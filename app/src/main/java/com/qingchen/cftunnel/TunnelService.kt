@@ -8,6 +8,7 @@ import androidx.core.app.NotificationCompat
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.util.ArrayList
 import kotlin.concurrent.thread
 
 class TunnelService : Service() {
@@ -30,21 +31,32 @@ class TunnelService : Service() {
         val port = intent?.getStringExtra("port") ?: "8080"
         val token = intent?.getStringExtra("token") ?: ""
 
-        // 停止之前的进程
         stopTunnelProcess()
-
         TunnelManager.startTunnel()
 
         thread {
+            val lastLogs = ArrayList<String>() // 用于收集最后几行日志
             try {
                 val nativeDir = applicationInfo.nativeLibraryDir
-                val cloudflaredPath = File(nativeDir, "libcloudflared.so").absolutePath
+                val fileSO = File(nativeDir, "libcloudflared.so")
+
+                if (!fileSO.exists()) {
+                    TunnelManager.updateStatus("错误: libcloudflared.so 动态库不存在")
+                    return@thread
+                }
+
+                // 强制尝试赋予可执行权限，防止部分系统安全策略拦截
+                try {
+                    fileSO.setExecutable(true, false)
+                } catch (e: Exception) {
+                    lastLogs.add("授权执行失败: ${e.message}")
+                }
 
                 // 构建执行参数
                 val command = if (mode == 0) {
-                    listOf(cloudflaredPath, "tunnel", "--url", "http://127.0.0.1:$port")
+                    listOf(fileSO.absolutePath, "tunnel", "--url", "http://127.0.0.1:$port")
                 } else {
-                    listOf(cloudflaredPath, "tunnel", "run", "--token", token)
+                    listOf(fileSO.absolutePath, "tunnel", "run", "--token", token)
                 }
 
                 val pb = ProcessBuilder(command)
@@ -61,6 +73,12 @@ class TunnelService : Service() {
                 while (reader.readLine().also { line = it } != null) {
                     val logLine = line ?: break
                     android.util.Log.d("cftunnel_kernel", logLine)
+
+                    // 缓存最新的 5 行日志
+                    if (lastLogs.size >= 5) {
+                        lastLogs.removeAt(0)
+                    }
+                    lastLogs.add(logLine)
 
                     // 1. 临时隧道：抓取分配的公网 trycloudflare.com 域名
                     if (mode == 0 && logLine.contains("trycloudflare.com")) {
@@ -83,11 +101,13 @@ class TunnelService : Service() {
                 // 读取结束，判断是否异常退出
                 val exitCode = proc.waitFor()
                 if (exitCode != 0) {
-                    TunnelManager.updateStatus("内核异常退出，代码: $exitCode")
+                    val errorSummary = lastLogs.joinToString("\n")
+                    TunnelManager.updateStatus("内核退出 ($exitCode)。控制台日志:\n$errorSummary")
                 }
 
             } catch (e: Exception) {
-                TunnelManager.updateStatus("启动失败: ${e.message}")
+                val errorSummary = lastLogs.joinToString("\n")
+                TunnelManager.updateStatus("启动发生异常:\n${e.message}\n$errorSummary")
             } finally {
                 TunnelManager.stopTunnel()
                 stopSelf()
@@ -112,9 +132,7 @@ class TunnelService : Service() {
         super.onDestroy()
     }
 
-    // --- 通知栏保活适配 ---
     private fun createNotificationChannel() {
-        // 修正点：将等号(=)修改为了正常的点号(.)，表示 Android 8.0 Oreo 的代号
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
@@ -135,7 +153,7 @@ class TunnelService : Service() {
         return NotificationCompat.Builder(this, channelId)
             .setContentTitle("cftunnel 正在后台保障穿透")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_menu_compass) // 使用系统内置指南针图标
+            .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
