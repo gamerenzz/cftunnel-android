@@ -1,6 +1,7 @@
 package com.qingchen.cftunnel
 
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -31,7 +32,7 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = Color(0xFF0F0F14) // 深色高阶质感背景
+                    color = Color(0xFF0F0F14)
                 ) {
                     TunnelDashboard()
                 }
@@ -46,24 +47,21 @@ fun TunnelDashboard() {
     val clipboardManager = LocalClipboardManager.current
     val sharedPrefs = remember { context.getSharedPreferences("cftunnel_prefs", Context.MODE_PRIVATE) }
 
-    // 定义 Tab 状态：0 = 临时隧道, 1 = 永久隧道
+    // 双标签
     var selectedTab by remember { mutableStateOf(0) }
 
-    // 输入持久化状态
+    // 输入框状态
     var portText by remember { mutableStateOf(sharedPrefs.getString("local_port", "8080") ?: "8080") }
     var tokenText by remember { mutableStateOf(sharedPrefs.getString("tunnel_token", "") ?: "") }
 
-    // 运行状态与临时 URL 模拟（后续阶段将与前台服务联动）
-    var isRunning by remember { mutableStateOf(false) }
-    var generatedUrl by remember { mutableStateOf("") }
+    // 实时的全局进程状态监听
+    val isRunning by TunnelManager.isRunning.collectAsState()
+    val generatedUrl by TunnelManager.tunnelUrl.collectAsState()
+    val statusText by TunnelManager.statusText.collectAsState()
 
-    // 监听输入并自动保存
-    LaunchedEffect(portText) {
-        sharedPrefs.edit().putString("local_port", portText).apply()
-    }
-    LaunchedEffect(tokenText) {
-        sharedPrefs.edit().putString("tunnel_token", tokenText).apply()
-    }
+    // 自动保存输入
+    LaunchedEffect(portText) { sharedPrefs.edit().putString("local_port", portText).apply() }
+    LaunchedEffect(tokenText) { sharedPrefs.edit().putString("tunnel_token", tokenText).apply() }
 
     Column(
         modifier = Modifier
@@ -71,7 +69,6 @@ fun TunnelDashboard() {
             .padding(16.dp)
             .statusBarsPadding()
     ) {
-        // 头部标题
         Text(
             text = "cftunnel 控制台",
             color = Color.White,
@@ -80,7 +77,6 @@ fun TunnelDashboard() {
             modifier = Modifier.padding(vertical = 12.dp)
         )
 
-        // 标签切换
         TabRow(
             selectedTabIndex = selectedTab,
             containerColor = Color(0xFF161622),
@@ -105,7 +101,6 @@ fun TunnelDashboard() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // 核心配置卡片区域
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
@@ -113,7 +108,6 @@ fun TunnelDashboard() {
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 if (selectedTab == 0) {
-                    // --- 临时隧道布局 ---
                     Text(
                         text = "配置本地转发端口",
                         color = Color(0xFFE4E4EF),
@@ -140,24 +134,22 @@ fun TunnelDashboard() {
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // 端口范围校验提示（纯文字引导）
                     val portVal = portText.toIntOrNull()
                     if (portVal != null && portVal < 1024) {
                         Text(
-                            text = "⚠️ 注意：当前端口小于 1024。在非 Root 安卓设备上，系统可能限制应用绑定低于 1024 的端口。若启动失败，请将您的本地服务端口调整至 1024 以上（例如 8080）。",
-                            color = Color(0xFFF59E0B), // 警告黄
+                            text = "⚠️ 注意：当前端口小于 1024。在非 Root 安卓设备上，系统可能限制使用低于 1024 的端口。若启动失败，请将您的本地服务端口调整至 1024 以上（例如 8080）。",
+                            color = Color(0xFFF59E0B),
                             fontSize = 12.sp,
                             lineHeight = 16.sp
                         )
                     } else if (portVal != null) {
                         Text(
                             text = "✓ 该端口范围（>= 1024）适合非 Root 设备正常运行。",
-                            color = Color(0xFF22C55E), // 合规绿
+                            color = Color(0xFF22C55E),
                             fontSize = 12.sp
                         )
                     }
                 } else {
-                    // --- 永久隧道布局 ---
                     Text(
                         text = "配置 Cloudflare 隧道 Token",
                         color = Color(0xFFE4E4EF),
@@ -185,23 +177,27 @@ fun TunnelDashboard() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // 控制按钮区域
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Button(
                 onClick = {
-                    if (selectedTab == 1 && tokenText.isBlank()) {
-                        Toast.makeText(context, "请先输入 Token", Toast.LENGTH_SHORT).show()
-                        return@Button
-                    }
-                    isRunning = !isRunning
-                    if (isRunning) {
-                        // 第三阶段加入真正的 Service 绑定逻辑
-                        generatedUrl = "https://mock-temporary-subdomain.trycloudflare.com"
+                    val serviceIntent = Intent(context, TunnelService::class.java)
+                    if (!isRunning) {
+                        if (selectedTab == 1 && tokenText.isBlank()) {
+                            Toast.makeText(context, "请先输入 Token", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+                        
+                        // 启动前台服务
+                        serviceIntent.putExtra("mode", selectedTab)
+                        serviceIntent.putExtra("port", portText)
+                        serviceIntent.putExtra("token", tokenText)
+                        context.startService(serviceIntent)
                     } else {
-                        generatedUrl = ""
+                        // 停止前台服务
+                        context.stopService(serviceIntent)
                     }
                 },
                 modifier = Modifier.weight(1f),
@@ -220,7 +216,6 @@ fun TunnelDashboard() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // 状态及运行结果反馈
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
@@ -249,7 +244,7 @@ fun TunnelDashboard() {
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (isRunning) "隧道正在运行..." else "隧道已停止",
+                        text = statusText,
                         color = Color.White,
                         fontSize = 14.sp
                     )
@@ -257,7 +252,7 @@ fun TunnelDashboard() {
 
                 if (isRunning && selectedTab == 0 && generatedUrl.isNotEmpty()) {
                     Text(
-                        text = "公网临时访问地址:",
+                        text = "公网临时访问地址 (已联调真实内核):",
                         color = Color(0xFF8888A0),
                         fontSize = 12.sp,
                         modifier = Modifier.padding(bottom = 4.dp)
@@ -293,7 +288,6 @@ fun TunnelDashboard() {
 
         Spacer(modifier = Modifier.weight(1f))
 
-        // 科普与规则卡片（底部常驻）
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A26)),
