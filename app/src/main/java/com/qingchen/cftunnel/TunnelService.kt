@@ -114,7 +114,8 @@ class TunnelService : Service() {
 
     // --- 通知栏保活适配 ---
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES = O) {
+        // 修正点：将等号(=)修改为了正常的点号(.)，表示 Android 8.0 Oreo 的代号
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
                 "cftunnel 运行状态监听",
