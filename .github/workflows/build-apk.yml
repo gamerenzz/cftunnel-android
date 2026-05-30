@@ -1,6 +1,7 @@
 name: Build Android APK
 
 on:
+  push:
   workflow_dispatch: # 支持手动触发构建
 
 jobs:
@@ -43,12 +44,12 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    # 4. 授予 Gradle 执行权限
-    - name: Grant execute permission for gradlew
+    # 4. 强制生成兼容的 Gradle 8.5 包装器并授予执行权限
+    - name: Generate Gradle Wrapper
       run: |
-        # 如果本地仓库没有 gradlew，则用 gradle wrapper 生成
         if [ ! -f "gradlew" ]; then
-          gradle wrapper
+          # 显式指定 gradle 版本为 8.5，防止自动下载不兼容的 9.x 版本
+          gradle wrapper --gradle-version 8.5 --distribution-type bin
         fi
         chmod +x gradlew
 
