@@ -1,7 +1,6 @@
 name: Build Android APK
 
 on:
-  push:
   workflow_dispatch: # 支持手动触发构建
 
 jobs:
