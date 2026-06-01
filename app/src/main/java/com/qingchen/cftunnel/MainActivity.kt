@@ -57,19 +57,17 @@ fun TunnelDashboard() {
     var portText by remember { mutableStateOf(sharedPrefs.getString("local_port", "8181") ?: "8181") }
     var tokenText by remember { mutableStateOf(sharedPrefs.getString("tunnel_token", "") ?: "") }
 
-    // 新增：内嵌文件服务器配置状态与持久化
     var useFileServer by remember { mutableStateOf(sharedPrefs.getBoolean("use_file_server", true)) }
     var sharePath by remember { mutableStateOf(sharedPrefs.getString("share_path", "/storage/emulated/0/Download") ?: "/storage/emulated/0/Download") }
 
-    // 运行状态与日志
     val isRunning by TunnelManager.isRunning.collectAsState()
     val generatedUrl by TunnelManager.tunnelUrl.collectAsState()
     val statusText by TunnelManager.statusText.collectAsState()
+    
     val logs by LogManager.logs.collectAsState()
-    var showLogs by remember { mutableStateOf(false) }
+    var showLogs by remember { mutableStateOf(true) } // 默认直接展开，方便查看联调
     val lazyListState = rememberLazyListState()
 
-    // 自动保存输入
     LaunchedEffect(portText) { sharedPrefs.edit().putString("local_port", portText).apply() }
     LaunchedEffect(tokenText) { sharedPrefs.edit().putString("tunnel_token", tokenText).apply() }
     LaunchedEffect(useFileServer) { sharedPrefs.edit().putBoolean("use_file_server", useFileServer).apply() }
@@ -152,7 +150,6 @@ fun TunnelDashboard() {
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // --- 新增：内嵌文件服务器开关与路径配置卡片 ---
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -204,7 +201,6 @@ fun TunnelDashboard() {
 
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // 快速填入按钮行
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -304,12 +300,10 @@ fun TunnelDashboard() {
                         serviceIntent.putExtra("mode", selectedTab)
                         serviceIntent.putExtra("port", portText)
                         serviceIntent.putExtra("token", tokenText)
-                        
-                        // 注入内嵌文件服务器所需参数
                         serviceIntent.putExtra("use_file_server", useFileServer && selectedTab == 0)
                         serviceIntent.putExtra("share_path", sharePath)
 
-                        LogManager.addLog("UI", "用户点击了[启动隧道]按钮，目标端口: $portText，模式: ${if(selectedTab==0)"免域名" else "永久"}")
+                        LogManager.addLog("UI", "用户点击了[启动隧道]按钮，端口: $portText")
 
                         try {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -427,6 +421,7 @@ fun TunnelDashboard() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        // --- 核心调试日志卡片（复制、清空、折叠全部移到标题栏，最醒目，绝不遮挡） ---
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
@@ -434,23 +429,56 @@ fun TunnelDashboard() {
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { showLogs = !showLogs },
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "📊 调试控制台日志 (${logs.size}条)",
+                        text = "📊 调试日志 (${logs.size}条)",
                         color = Color(0xFFE4E4EF),
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.clickable { showLogs = !showLogs }
                     )
-                    Text(
-                        text = if (showLogs) "▲ 收起日志" else "▼ 展开日志",
-                        color = Color(0xFF60A5FA),
-                        fontSize = 12.sp
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "复制",
+                            color = Color(0xFF60A5FA),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clickable {
+                                    val allLogs = LogManager.getAllLogsString()
+                                    if (allLogs.isNotEmpty()) {
+                                        clipboardManager.setText(AnnotatedString(allLogs))
+                                        Toast.makeText(context, "日志已复制", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "暂无日志", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                        Text(
+                            text = "清空",
+                            color = Color(0xFFEF4444),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clickable { LogManager.clearLogs() }
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                        Text(
+                            text = if (showLogs) "▲ 收起" else "▼ 展开",
+                            color = Color(0xFF8888A0),
+                            fontSize = 12.sp,
+                            modifier = Modifier
+                                .clickable { showLogs = !showLogs }
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
                 }
 
                 if (showLogs) {
@@ -469,7 +497,7 @@ fun TunnelDashboard() {
                             items(logs) { logLine ->
                                 val color = when {
                                     logLine.contains("[Kernel]") -> Color(0xFF34D399)
-                                    logLine.contains("Error") || logLine.contains("失败") || logLine.contains("退出") -> Color(0xFFF87171)
+                                    logLine.contains("Error") || logLine.contains("失败") || logLine.contains("退出") || logLine.contains("ERR") -> Color(0xFFF87171)
                                     else -> Color(0xFF9CA3AF)
                                 }
                                 Text(
@@ -481,39 +509,6 @@ fun TunnelDashboard() {
                                     modifier = Modifier.padding(bottom = 2.dp)
                                 )
                             }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = {
-                                val allLogs = LogManager.getAllLogsString()
-                                if (allLogs.isNotEmpty()) {
-                                    clipboardManager.setText(AnnotatedString(allLogs))
-                                    Toast.makeText(context, "所有调试日志已复制到剪贴板", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "暂无日志可复制", Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2A2A3A)),
-                            shape = RoundedCornerShape(6.dp)
-                        ) {
-                            Text("复制全部日志", color = Color.White, fontSize = 12.sp)
-                        }
-
-                        Button(
-                            onClick = { LogManager.clearLogs() },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2A2A3A)),
-                            shape = RoundedCornerShape(6.dp)
-                        ) {
-                            Text("清空控制台", color = Color.White, fontSize = 12.sp)
                         }
                     }
                 }
