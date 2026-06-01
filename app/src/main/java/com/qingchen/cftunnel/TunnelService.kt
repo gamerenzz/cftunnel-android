@@ -49,6 +49,20 @@ class TunnelService : Service() {
         stopTunnelProcess()
         TunnelManager.startTunnel()
 
+        // 关键修复点：动态在 App 私有空间写入劫持后的 DNS 配置文件，赋予 Go 底层完美的解析能力
+        val resolvFile = File(filesDir, "resolv.conf")
+        try {
+            resolvFile.writeText(
+                "nameserver 114.114.114.114\n" +
+                "nameserver 223.5.5.5\n" +
+                "nameserver 8.8.8.8\n" +
+                "nameserver 1.1.1.1\n"
+            )
+            LogManager.addLog("Service", "DNS 配置文件 resolv.conf 成功写入 App 私有沙盒")
+        } catch (e: Exception) {
+            LogManager.addLog("Service_Error", "写入 resolv.conf 配置文件失败: ${e.message}")
+        }
+
         if (mode == 0 && useFileServer && sharePath.isNotEmpty()) {
             val success = FileServer.start(port.toInt(), sharePath)
             if (!success) {
@@ -89,10 +103,8 @@ class TunnelService : Service() {
                 LogManager.addLog("Service", "构建执行进程指令: ${command.joinToString(" ")}")
 
                 val pb = ProcessBuilder(command)
-                // 关键点 1：重定向环境变量，防止 Go 写入家目录失败导致闪退
                 pb.environment()["HOME"] = filesDir.absolutePath
-                // 关键点 2（新增）：强行锁死运行期 Go 只准使用安卓原生 CGO DNS 解析，彻底杜绝其退回 [::1]:53 导致闪退
-                pb.environment()["GODEBUG"] = "netdns=cgo"
+                pb.environment()["GODEBUG"] = "netdns=cgo" // 优先尝试 CGO
                 
                 pb.redirectErrorStream(true)
 
