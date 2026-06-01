@@ -4,6 +4,7 @@ import java.io.*
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
+import java.util.ArrayList
 import kotlin.concurrent.thread
 
 object FileServer {
@@ -100,7 +101,7 @@ object FileServer {
                 reqPath = reqPath.substringBefore("?")
             }
 
-            // 解析多个物理路径列表 (分号拼合)
+            // 解析多个物理路径列表
             val sharedPaths = rawPaths.split(";").map { it.trim() }.filter { it.isNotEmpty() }
             if (sharedPaths.isEmpty()) {
                 sendTextResponse(out, 500, "Internal Error", "未配置有效的本地共享目录")
@@ -109,7 +110,7 @@ object FileServer {
 
             val isMultiRoot = sharedPaths.size > 1
 
-            // --- 路由分发机制 A：处理虚拟多根目录的主页渲染 (isMultiRoot == true 且请求为 "/") ---
+            // --- 优先路由 A：处理虚拟多根目录的主页渲染 ---
             if (isMultiRoot && (reqPath == "/" || reqPath.isEmpty())) {
                 if (method == "POST") {
                     sendTextResponse(out, 403, "Forbidden", "虚拟主目录不支持直接上传，请点击并进入指定文件夹上传。")
@@ -120,32 +121,7 @@ object FileServer {
                 return
             }
 
-            // 定位目标物理基准目录 (Base Directory) 与相对路径 (Clean Path)
-            var cleanPath = reqPath.trimStart('/')
-            if (cleanPath.contains("..")) {
-                cleanPath = cleanPath.replace("..", "")
-            }
-
-            val targetBaseDir: String
-            val targetCleanPath: String
-
-            if (isMultiRoot) {
-                // 如果是多盘模式下，请求路径的第一层是“虚拟盘符”（如 /Download/abc.txt 中的 Download）
-                val firstSegment = cleanPath.substringBefore("/")
-                val matchedPath = sharedPaths.firstOrNull { File(it).name == firstSegment }
-                
-                if (matchedPath == null) {
-                    sendTextResponse(out, 404, "Not Found", "无法在虚拟多盘列表中定位到该盘符: $firstSegment")
-                    return
-                }
-                targetBaseDir = matchedPath
-                targetCleanPath = cleanPath.substringAfter("/", "")
-            } else {
-                targetBaseDir = sharedPaths[0]
-                targetCleanPath = cleanPath
-            }
-
-            // --- 路由分发机制 B：处理公网文件上传 ---
+            // --- 优先路由 B：优先拦截处理公网 POST 文件上传，防止其进入盘符匹配器 ---
             if (method == "POST" && reqPath.startsWith("/upload")) {
                 if (!isUploadAllowed) {
                     sendTextResponse(out, 403, "Forbidden", "手机端未开启公网上传文件权限。")
@@ -173,7 +149,7 @@ object FileServer {
                     return
                 }
 
-                // 针对多盘模式，解析出上传路径在哪个子盘中
+                // 针对多盘模式，解析出上传的目标物理路径
                 val uploadBaseDir: String
                 val uploadCleanPath: String
                 var cleanUploadRelDir = destDirRel.trimStart('/')
@@ -185,7 +161,7 @@ object FileServer {
                     val firstSegment = cleanUploadRelDir.substringBefore("/")
                     val matchedPath = sharedPaths.firstOrNull { File(it).name == firstSegment }
                     if (matchedPath == null) {
-                        sendTextResponse(out, 404, "Not Found", "定位上传盘符失败")
+                        sendTextResponse(out, 404, "Not Found", "定位上传盘符失败: $firstSegment")
                         return
                     }
                     uploadBaseDir = matchedPath
@@ -235,7 +211,29 @@ object FileServer {
                 return
             }
 
-            // --- 路由分发机制 C：处理文件浏览和下载 ---
+            // --- 常规路由 C：处理非主页、非上传的常规 GET 文件浏览和下载 ---
+            var cleanPath = reqPath.trimStart('/')
+            if (cleanPath.contains("..")) {
+                cleanPath = cleanPath.replace("..", "")
+            }
+
+            val targetBaseDir: String
+            val targetCleanPath: String
+
+            if (isMultiRoot) {
+                val firstSegment = cleanPath.substringBefore("/")
+                val matchedPath = sharedPaths.firstOrNull { File(it).name == firstSegment }
+                if (matchedPath == null) {
+                    sendTextResponse(out, 404, "Not Found", "无法在虚拟多盘列表中定位到该盘符: $firstSegment")
+                    return
+                }
+                targetBaseDir = matchedPath
+                targetCleanPath = cleanPath.substringAfter("/", "")
+            } else {
+                targetBaseDir = sharedPaths[0]
+                targetCleanPath = cleanPath
+            }
+
             val targetFile = File(targetBaseDir, targetCleanPath)
             LogManager.addLog("FileServer", "请求: ${parts[1]} -> 目标物理绝对路径: ${targetFile.absolutePath} (存在: ${targetFile.exists()}, 文件夹: ${targetFile.isDirectory})")
 
@@ -270,7 +268,6 @@ object FileServer {
         }
     }
 
-    // 虚拟多盘主界面 HTML 渲染器
     private fun buildMultiRootHtml(paths: List<String>): String {
         val sb = StringBuilder()
         sb.append("<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>")
