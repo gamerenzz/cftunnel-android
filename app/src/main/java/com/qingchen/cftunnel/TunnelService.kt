@@ -42,11 +42,24 @@ class TunnelService : Service() {
         val mode = intent?.getIntExtra("mode", 0) ?: 0
         val port = intent?.getStringExtra("port") ?: "8080"
         val token = intent?.getStringExtra("token") ?: ""
-
-        LogManager.addLog("Service", "收到启动指令：mode=${if(mode==0)"免域名" else "永久"}, port=$port")
+        
+        // 新增参数：是否启用内嵌文件服务器
+        val useFileServer = intent?.getBooleanExtra("use_file_server", false) ?: false
+        val sharePath = intent?.getStringExtra("share_path") ?: ""
 
         stopTunnelProcess()
         TunnelManager.startTunnel()
+
+        // 1. 如果是临时免域名模式且开启了文件共享，优先拉起内嵌 HTTP 服务器
+        if (mode == 0 && useFileServer && sharePath.isNotEmpty()) {
+            val success = FileServer.start(port.toInt(), sharePath)
+            if (!success) {
+                LogManager.addLog("Service_Error", "内嵌文件服务器启动失败，请检查端口是否被占用")
+                TunnelManager.updateStatus("错误: 文件服务器启动失败")
+                stopSelf()
+                return START_NOT_STICKY
+            }
+        }
 
         thread {
             val lastLogs = ArrayList<String>()
@@ -91,8 +104,6 @@ class TunnelService : Service() {
                 
                 while (reader.readLine().also { line = it } != null) {
                     val logLine = line ?: break
-                    
-                    // 核心拦截点：将 cloudflared 进程的每一行标准输出/标准错误全量注入全局日志中
                     LogManager.addLog("Kernel", logLine)
 
                     if (lastLogs.size >= 5) {
@@ -146,19 +157,20 @@ class TunnelService : Service() {
         }
     }
 
+    override fun onDestroy() {
+        LogManager.addLog("Service", "onDestroy()：后台保活服务生命周期结束，正在执行资源回收...")
+        stopTunnelProcess()
+        FileServer.stop() // 同时安全停止内嵌文件服务器
+        TunnelManager.stopTunnel()
+        super.onDestroy()
+    }
+
     private fun getProcessId(p: Process): String {
         return try {
             p.toString().substringAfter("pid=").substringBefore(",")
         } catch (e: Exception) {
             "Unknown"
         }
-    }
-
-    override fun onDestroy() {
-        LogManager.addLog("Service", "onDestroy()：后台保活服务生命周期结束，正在执行资源回收...")
-        stopTunnelProcess()
-        TunnelManager.stopTunnel()
-        super.onDestroy()
     }
 
     private fun createNotificationChannel() {
