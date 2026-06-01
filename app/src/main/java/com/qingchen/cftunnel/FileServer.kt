@@ -12,12 +12,19 @@ object FileServer {
     private var isRunning = false
     var currentPath: String = ""
     var isUploadAllowed: Boolean = false
+    
+    // 新增：全局密码控制字段
+    var isAuthEnabled: Boolean = false
+    var authPasswordStr: String = ""
 
-    fun start(port: Int, path: String, allowUpload: Boolean): Boolean {
+    fun start(port: Int, path: String, allowUpload: Boolean, useAuth: Boolean, authPass: String): Boolean {
         return try {
             stop()
             currentPath = path
             isUploadAllowed = allowUpload
+            isAuthEnabled = useAuth
+            authPasswordStr = authPass
+            
             serverSocket = ServerSocket(port)
             isRunning = true
             
@@ -36,7 +43,7 @@ object FileServer {
                     }
                 }
             }
-            LogManager.addLog("FileServer", "内嵌网页文件服务器启动成功！路径列表: $path (允许公网上传: $allowUpload)")
+            LogManager.addLog("FileServer", "内嵌网页文件服务器启动成功！允许公网上传: $allowUpload, 启用密码保护: $useAuth")
             true
         } catch (e: Exception) {
             LogManager.addLog("FileServer_Error", "内嵌文件服务器启动失败，原因: ${e.message}")
@@ -101,6 +108,53 @@ object FileServer {
                 reqPath = reqPath.substringBefore("?")
             }
 
+            // --- 终极注入点 1：公网访问安全密码校验 (HTTP Basic Auth) ---
+            if (isAuthEnabled && authPasswordStr.isNotEmpty()) {
+                var isAuthorized = false
+                var authHeader: String? = null
+                
+                // 从请求头中检索 Authorization 授权头
+                for (h in headers) {
+                    if (h.lowercase().startsWith("authorization:")) {
+                        authHeader = h.substringAfter(":").trim()
+                    }
+                }
+                
+                if (authHeader != null && authHeader.startsWith("Basic ", ignoreCase = true)) {
+                    val base64Credentials = authHeader.substring(6).trim()
+                    try {
+                        // 使用安卓内置的 Base64 库进行解码
+                        val decodedBytes = android.util.Base64.decode(base64Credentials, android.util.Base64.DEFAULT)
+                        val credentials = String(decodedBytes, Charsets.UTF_8)
+                        // HTTP 规范标准格式为 "用户名:密码"，此处提取出密码进行比对
+                        val credentialParts = credentials.split(":")
+                        if (credentialParts.size >= 2) {
+                            val clientPassword = credentialParts[1]
+                            if (clientPassword == authPasswordStr) {
+                                isAuthorized = true
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+                
+                // 如果未授权，向浏览器发送 401 挑战信息，强行弹出原生登录弹窗
+                if (!isAuthorized) {
+                    LogManager.addLog("FileServer_Warning", "拒绝匿名公网访问：触发密码保护机制，已发送认证挑战。")
+                    val challengeHeader = "HTTP/1.1 401 Unauthorized\r\n" +
+                            "WWW-Authenticate: Basic realm=\"cftunnel Private File Sharing\"\r\n" +
+                            "Content-Type: text/plain; charset=utf-8\r\n" +
+                            "Content-Length: 32\r\n" +
+                            "Connection: close\r\n" +
+                            "\r\n"
+                    out.write(challengeHeader.toByteArray(Charsets.UTF_8))
+                    out.write("401 Unauthorized: Access Denied.".toByteArray(Charsets.UTF_8))
+                    out.flush()
+                    return // 直接拦截阻断，后续逻辑绝不执行
+                }
+            }
+
             // 解析多个物理路径列表
             val sharedPaths = rawPaths.split(";").map { it.trim() }.filter { it.isNotEmpty() }
             if (sharedPaths.isEmpty()) {
@@ -121,7 +175,7 @@ object FileServer {
                 return
             }
 
-            // --- 优先路由 B：优先拦截处理公网 POST 文件上传，防止其进入盘符匹配器 ---
+            // --- 优先路由 B：优先拦截处理公网 POST 文件上传 ---
             if (method == "POST" && reqPath.startsWith("/upload")) {
                 if (!isUploadAllowed) {
                     sendTextResponse(out, 403, "Forbidden", "手机端未开启公网上传文件权限。")
@@ -149,7 +203,6 @@ object FileServer {
                     return
                 }
 
-                // 针对多盘模式，解析出上传的目标物理路径
                 val uploadBaseDir: String
                 val uploadCleanPath: String
                 var cleanUploadRelDir = destDirRel.trimStart('/')
@@ -171,7 +224,6 @@ object FileServer {
                     uploadCleanPath = cleanUploadRelDir
                 }
 
-                // 提取 Content-Length
                 var contentLength = -1L
                 for (h in headers) {
                     if (h.lowercase().startsWith("content-length:")) {
@@ -211,7 +263,7 @@ object FileServer {
                 return
             }
 
-            // --- 常规路由 C：处理非主页、非上传的常规 GET 文件浏览和下载 ---
+            // --- 常规路由 C：处理常规 GET 文件浏览和下载 ---
             var cleanPath = reqPath.trimStart('/')
             if (cleanPath.contains("..")) {
                 cleanPath = cleanPath.replace("..", "")
