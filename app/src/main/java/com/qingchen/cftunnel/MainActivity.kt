@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.PowerManager
 import android.provider.DocumentsContract
 import android.provider.Settings
 import android.widget.Toast
@@ -47,7 +48,11 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // 1. 动态读取权限检测
         checkAndRequestPermissions()
+        // 2. 核心适配：动态申请系统级“忽略电池优化”白名单，保障息屏进程不被系统冻结强杀
+        requestIgnoreBatteryOptimizations()
 
         setContent {
             MaterialTheme {
@@ -89,6 +94,26 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun requestIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    LogManager.addLog("System", "检测到未加入 [电池优化白名单]，正在拉起系统申请窗口...")
+                    Toast.makeText(this, "请将 cftunnel 设为 [无限制] 或允许后台高耗电运行，以防止息屏后网络穿透中断！", Toast.LENGTH_LONG).show()
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            } else {
+                LogManager.addLog("System", "已成功加入系统 [电池优化白名单]")
+            }
+        }
+    }
 }
 
 fun getPathFromUri(context: Context, uri: Uri): String? {
@@ -126,13 +151,13 @@ fun TunnelDashboard() {
     var sharePath by remember { mutableStateOf(sharedPrefs.getString("share_path", "/storage/emulated/0/Download") ?: "/storage/emulated/0/Download") }
     var allowUpload by remember { mutableStateOf(sharedPrefs.getBoolean("allow_upload", false)) }
     
-    // 新增：安全密码开关与文本持久化状态
     var useAuth by remember { mutableStateOf(sharedPrefs.getBoolean("use_auth", false)) }
     var authPassword by remember { mutableStateOf(sharedPrefs.getString("auth_password", "") ?: "") }
 
     val isRunning by TunnelManager.isRunning.collectAsState()
     val generatedUrl by TunnelManager.tunnelUrl.collectAsState()
     val statusText by TunnelManager.statusText.collectAsState()
+    
     val logs by LogManager.logs.collectAsState()
     var showLogs by remember { mutableStateOf(true) } 
     val lazyListState = rememberLazyListState()
@@ -143,8 +168,6 @@ fun TunnelDashboard() {
     LaunchedEffect(useFileServer) { sharedPrefs.edit().putBoolean("use_file_server", useFileServer).apply() }
     LaunchedEffect(sharePath) { sharedPrefs.edit().putString("share_path", sharePath).apply() }
     LaunchedEffect(allowUpload) { sharedPrefs.edit().putBoolean("allow_upload", allowUpload).apply() }
-    
-    // 持久化保存密码配置
     LaunchedEffect(useAuth) { sharedPrefs.edit().putBoolean("use_auth", useAuth).apply() }
     LaunchedEffect(authPassword) { sharedPrefs.edit().putString("auth_password", authPassword).apply() }
 
@@ -306,7 +329,6 @@ fun TunnelDashboard() {
 
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        // --- 新增：允许公网访问密码的开关与文本框 UI 控制 ---
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -488,8 +510,6 @@ fun TunnelDashboard() {
                         serviceIntent.putExtra("use_file_server", useFileServer && selectedTab == 0)
                         serviceIntent.putExtra("share_path", sharePath)
                         serviceIntent.putExtra("allow_upload", allowUpload && selectedTab == 0)
-                        
-                        // 适配点：启动时，将 use_auth 和 auth_password 数据传递给 Service
                         serviceIntent.putExtra("use_auth", useAuth && selectedTab == 0)
                         serviceIntent.putExtra("auth_password", authPassword)
 
@@ -573,7 +593,29 @@ fun TunnelDashboard() {
                     )
                 }
 
+                if (isRunning) {
+                    // --- 核心优化回显点：当启动时，动态显示共享的文件目录列表和安全密码，彻底解决遗忘痛点 ---
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "📁 已挂载共享路径:\n${sharePath.replace(";", "\n")}",
+                        color = Color(0xFF60A5FA),
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    if (useAuth && authPassword.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "🔐 公网访问密码:  $authPassword",
+                            color = Color(0xFFF59E0B),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
                 if (isRunning && selectedTab == 0 && generatedUrl.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(10.dp))
                     Text(
                         text = "公网临时访问地址 (已联调真实内核):",
                         color = Color(0xFF8888A0),
