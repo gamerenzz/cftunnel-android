@@ -189,14 +189,31 @@ fun TunnelDashboard() {
                         serviceIntent.putExtra("port", portText)
                         serviceIntent.putExtra("token", tokenText)
 
-                        // 适配点：高版本安卓启动前台服务必须使用 startForegroundService
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            context.startForegroundService(serviceIntent)
-                        } else {
-                            context.startService(serviceIntent)
+                        // 适配点：高版本安卓启动前台服务必须使用 startForegroundService 且对其异常进行强行拦截提示
+                        try {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                context.startForegroundService(serviceIntent)
+                            } else {
+                                context.startService(serviceIntent)
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                            Toast.makeText(context, "启动服务受阻: ${e.message}", Toast.LENGTH_LONG).show()
+                            // 直接将底层被强杀的拦截报错信息更新至屏幕，指引荣耀手机用户赋权
+                            TunnelManager.startTunnel("荣耀系统拦截了后台启动...")
+                            TunnelManager.updateStatus(
+                                "⚠️ 启动受阻！您的荣耀手机可能默认拦截了本应用的后台保活与自启动机制。\n" +
+                                "请尝试前往：【系统设置 -> 应用 -> 应用启动管理 -> 找到 cftunnel -> 关闭自动管理 -> 开启允许自启动、允许后台运行】后再试。\n" +
+                                "底层系统错误信息:\n${e.message}"
+                            )
+                            TunnelManager.stopTunnel()
                         }
                     } else {
-                        context.stopService(serviceIntent)
+                        try {
+                            context.stopService(serviceIntent)
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
                     }
                 },
                 modifier = Modifier.weight(1f),
