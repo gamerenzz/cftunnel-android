@@ -91,7 +91,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// 安卓原生文档树存储路径转换器：零依赖将 content:// 树状 URI 解析为手机绝对物理路径 (/storage/emulated/0/...)
 fun getPathFromUri(context: Context, uri: Uri): String? {
     return try {
         val rawId = DocumentsContract.getTreeDocumentId(uri)
@@ -102,7 +101,7 @@ fun getPathFromUri(context: Context, uri: Uri): String? {
             if ("primary".equals(type, ignoreCase = true)) {
                 "/storage/emulated/0/$relativePath"
             } else {
-                "/storage/$type/$relativePath" // 兼容外置 SD 内存卡
+                "/storage/$type/$relativePath"
             }
         } else {
             null
@@ -124,10 +123,12 @@ fun TunnelDashboard() {
     var tokenText by remember { mutableStateOf(sharedPrefs.getString("tunnel_token", "") ?: "") }
 
     var useFileServer by remember { mutableStateOf(sharedPrefs.getBoolean("use_file_server", true)) }
-    
-    // 默认依然是 Download 目录
     var sharePath by remember { mutableStateOf(sharedPrefs.getString("share_path", "/storage/emulated/0/Download") ?: "/storage/emulated/0/Download") }
     var allowUpload by remember { mutableStateOf(sharedPrefs.getBoolean("allow_upload", false)) }
+    
+    // 新增：安全密码开关与文本持久化状态
+    var useAuth by remember { mutableStateOf(sharedPrefs.getBoolean("use_auth", false)) }
+    var authPassword by remember { mutableStateOf(sharedPrefs.getString("auth_password", "") ?: "") }
 
     val isRunning by TunnelManager.isRunning.collectAsState()
     val generatedUrl by TunnelManager.tunnelUrl.collectAsState()
@@ -137,12 +138,15 @@ fun TunnelDashboard() {
     val lazyListState = rememberLazyListState()
     val globalScrollState = rememberScrollState()
 
-    // 自动保存输入
     LaunchedEffect(portText) { sharedPrefs.edit().putString("local_port", portText).apply() }
     LaunchedEffect(tokenText) { sharedPrefs.edit().putString("tunnel_token", tokenText).apply() }
     LaunchedEffect(useFileServer) { sharedPrefs.edit().putBoolean("use_file_server", useFileServer).apply() }
     LaunchedEffect(sharePath) { sharedPrefs.edit().putString("share_path", sharePath).apply() }
     LaunchedEffect(allowUpload) { sharedPrefs.edit().putBoolean("allow_upload", allowUpload).apply() }
+    
+    // 持久化保存密码配置
+    LaunchedEffect(useAuth) { sharedPrefs.edit().putBoolean("use_auth", useAuth).apply() }
+    LaunchedEffect(authPassword) { sharedPrefs.edit().putString("auth_password", authPassword).apply() }
 
     LaunchedEffect(logs.size) {
         if (logs.isNotEmpty()) {
@@ -150,14 +154,12 @@ fun TunnelDashboard() {
         }
     }
 
-    // 安卓系统原生文件夹选择器回调监听
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri != null) {
             val resolvedPath = getPathFromUri(context, uri)
             if (resolvedPath != null) {
-                // 如果当前路径是默认的 Download 或者为空，直接替换。否则以分号 ";" 追加进行多目录挂载
                 if (sharePath == "/storage/emulated/0/Download" || sharePath.isBlank()) {
                     sharePath = resolvedPath
                     LogManager.addLog("UI", "成功选择自定义共享目录: $resolvedPath")
@@ -302,6 +304,59 @@ fun TunnelDashboard() {
                             )
                         }
 
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // --- 新增：允许公网访问密码的开关与文本框 UI 控制 ---
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "启用公网访问密码",
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "外部打开网页需要通过浏览器密码验证",
+                                    color = Color(0xFF8888A0),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = useAuth,
+                                onCheckedChange = { if (!isRunning) useAuth = it },
+                                colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF3B82F6))
+                            )
+                        }
+
+                        if (useAuth) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "设置访问密码",
+                                color = Color(0xFFE4E4EF),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(bottom = 6.dp)
+                            )
+                            OutlinedTextField(
+                                value = authPassword,
+                                onValueChange = { if (!isRunning) authPassword = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = Color(0xFF3B82F6),
+                                    unfocusedBorderColor = Color(0xFF2A2A3A),
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
+                                ),
+                                placeholder = { Text("请设置公网访问密码，如 1234", color = Color(0xFF8888A0)) },
+                                singleLine = true,
+                                enabled = !isRunning
+                            )
+                        }
+
                         Spacer(modifier = Modifier.height(12.dp))
 
                         Text(
@@ -344,8 +399,6 @@ fun TunnelDashboard() {
                             ) {
                                 Text("默认下载目录", fontSize = 11.sp, color = Color.White)
                             }
-                            
-                            // 适配点：替换为了“自定义目录”按钮，点击拉起安卓系统原生文件夹选择器
                             Button(
                                 onClick = { 
                                     if (!isRunning) {
@@ -359,7 +412,6 @@ fun TunnelDashboard() {
                             ) {
                                 Text("自定义目录 ➕", fontSize = 11.sp, color = Color.White)
                             }
-                            
                             Button(
                                 onClick = { if (!isRunning) sharePath = "/storage/emulated/0" },
                                 modifier = btnModifier,
@@ -436,8 +488,12 @@ fun TunnelDashboard() {
                         serviceIntent.putExtra("use_file_server", useFileServer && selectedTab == 0)
                         serviceIntent.putExtra("share_path", sharePath)
                         serviceIntent.putExtra("allow_upload", allowUpload && selectedTab == 0)
+                        
+                        // 适配点：启动时，将 use_auth 和 auth_password 数据传递给 Service
+                        serviceIntent.putExtra("use_auth", useAuth && selectedTab == 0)
+                        serviceIntent.putExtra("auth_password", authPassword)
 
-                        LogManager.addLog("UI", "用户点击了[启动隧道]按钮，端口: $portText，共享上传: $allowUpload")
+                        LogManager.addLog("UI", "用户点击了[启动隧道]按钮，端口: $portText，共享上传: $allowUpload，开启密码保护: $useAuth")
 
                         try {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
