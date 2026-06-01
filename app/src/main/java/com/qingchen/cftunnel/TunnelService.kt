@@ -21,7 +21,6 @@ class TunnelService : Service() {
     private val notificationId = 1024
     private val channelId = "cftunnel_service_channel"
 
-    // 声明硬件锁：CPU 唤醒锁与高功耗 Wi-Fi 网络锁
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
@@ -44,7 +43,6 @@ class TunnelService : Service() {
         }
         LogManager.addLog("Service", "startForeground()：前台保活服务已挂载到状态栏")
 
-        // 强力硬核保活：申请系统 CPU 锁和最高性能级别 Wi-Fi 锁，防止息屏后进程被冻结或网络休眠断线
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "cftunnel::CpuWakeLock")
@@ -70,6 +68,9 @@ class TunnelService : Service() {
         val allowUpload = intent?.getBooleanExtra("allow_upload", false) ?: false
         val useAuth = intent?.getBooleanExtra("use_auth", false) ?: false
         val authPassword = intent?.getStringExtra("auth_password") ?: ""
+        
+        // 适配点 A：接收来自 UI 端的协议选择模式 (0 = quic, 1 = http2)
+        val protocolMode = intent?.getIntExtra("protocol_mode", 0) ?: 0
 
         stopTunnelProcess()
         TunnelManager.startTunnel()
@@ -119,10 +120,13 @@ class TunnelService : Service() {
                     lastLogs.add("授权执行失败: ${e.message}")
                 }
 
+                // 适配点 B：动态将用户指定的协议选项转化为 cloudflared 的命令行参数，在起进程时注入
+                val protocolStr = if (protocolMode == 1) "http2" else "quic"
+
                 val command = if (mode == 0) {
-                    listOf(fileSO.absolutePath, "tunnel", "--url", "http://127.0.0.1:$port")
+                    listOf(fileSO.absolutePath, "tunnel", "--protocol", protocolStr, "--url", "http://127.0.0.1:$port")
                 } else {
-                    listOf(fileSO.absolutePath, "tunnel", "run", "--token", token)
+                    listOf(fileSO.absolutePath, "tunnel", "--protocol", protocolStr, "run", "--token", token)
                 }
 
                 LogManager.addLog("Service", "构建执行进程指令: ${command.joinToString(" ")}")
@@ -201,7 +205,6 @@ class TunnelService : Service() {
         stopTunnelProcess()
         FileServer.stop()
         
-        // 安全释放物理锁
         try {
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
