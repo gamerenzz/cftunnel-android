@@ -49,16 +49,17 @@ class TunnelService : Service() {
         stopTunnelProcess()
         TunnelManager.startTunnel()
 
-        // 关键修复点：动态在 App 私有空间写入劫持后的 DNS 配置文件，赋予 Go 底层完美的解析能力
-        val resolvFile = File(filesDir, "resolv.conf")
+        // 关键修复点：强制向绝对物理路径写入 DNS 配置文件，确保和 Go 编译器中的补丁路径绝对一致
+        val resolvFile = File("/data/data/com.qingchen.cftunnel/files/resolv.conf")
         try {
+            resolvFile.parentFile?.mkdirs() // 确保父文件夹存在
             resolvFile.writeText(
                 "nameserver 114.114.114.114\n" +
                 "nameserver 223.5.5.5\n" +
                 "nameserver 8.8.8.8\n" +
                 "nameserver 1.1.1.1\n"
             )
-            LogManager.addLog("Service", "DNS 配置文件 resolv.conf 成功写入 App 私有沙盒")
+            LogManager.addLog("Service", "本地 DNS 配置文件 resolv.conf 已成功写入物理路径: ${resolvFile.absolutePath}")
         } catch (e: Exception) {
             LogManager.addLog("Service_Error", "写入 resolv.conf 配置文件失败: ${e.message}")
         }
@@ -104,7 +105,7 @@ class TunnelService : Service() {
 
                 val pb = ProcessBuilder(command)
                 pb.environment()["HOME"] = filesDir.absolutePath
-                pb.environment()["GODEBUG"] = "netdns=cgo" // 优先尝试 CGO
+                pb.environment()["GODEBUG"] = "netdns=go" // 允许 Go 引擎使用其内部解析器读取 resolv.conf
                 
                 pb.redirectErrorStream(true)
 
