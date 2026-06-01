@@ -43,8 +43,6 @@ import androidx.core.content.ContextCompat
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // 启动时强制执行最高文件管理特权检测与系统引导
         checkAndRequestPermissions()
 
         setContent {
@@ -60,8 +58,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkAndRequestPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) { // Android 11+
-            // 检测是否已经获得了所有文件访问特权
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
                 try {
                     LogManager.addLog("System", "检测到未获得 [所有文件访问权限]，正在引导跳转至系统设置页...")
@@ -72,7 +69,6 @@ class MainActivity : ComponentActivity() {
                     }
                     startActivity(intent)
                 } catch (e: Exception) {
-                    // 备用方案：如果部分定制系统无法直接精确跳转到本应用设置页，则跳转至全局管理页
                     val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
                     startActivity(intent)
                 }
@@ -80,7 +76,6 @@ class MainActivity : ComponentActivity() {
                 LogManager.addLog("System", "已确认拥有最高 [所有文件访问权限] 特权")
             }
         } else {
-            // Android 11 以下系统的常规动态权限申请
             val permissions = arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
             val neededPermissions = permissions.filter {
                 ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
@@ -104,6 +99,9 @@ fun TunnelDashboard() {
 
     var useFileServer by remember { mutableStateOf(sharedPrefs.getBoolean("use_file_server", true)) }
     var sharePath by remember { mutableStateOf(sharedPrefs.getString("share_path", "/storage/emulated/0/Download") ?: "/storage/emulated/0/Download") }
+    
+    // 新增：是否允许公网上传文件的开关配置状态
+    var allowUpload by remember { mutableStateOf(sharedPrefs.getBoolean("allow_upload", false)) }
 
     val isRunning by TunnelManager.isRunning.collectAsState()
     val generatedUrl by TunnelManager.tunnelUrl.collectAsState()
@@ -118,6 +116,7 @@ fun TunnelDashboard() {
     LaunchedEffect(tokenText) { sharedPrefs.edit().putString("tunnel_token", tokenText).apply() }
     LaunchedEffect(useFileServer) { sharedPrefs.edit().putBoolean("use_file_server", useFileServer).apply() }
     LaunchedEffect(sharePath) { sharedPrefs.edit().putString("share_path", sharePath).apply() }
+    LaunchedEffect(allowUpload) { sharedPrefs.edit().putBoolean("allow_upload", allowUpload).apply() }
 
     LaunchedEffect(logs.size) {
         if (logs.isNotEmpty()) {
@@ -224,6 +223,35 @@ fun TunnelDashboard() {
 
                     if (useFileServer) {
                         Spacer(modifier = Modifier.height(10.dp))
+                        
+                        // --- 新增：允许公网上传文件的 Switch 开关 ---
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "允许公网上传文件",
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "外部用户可以通过生成的网页上传文件",
+                                    color = Color(0xFF8888A0),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = allowUpload,
+                                onCheckedChange = { if (!isRunning) allowUpload = it },
+                                colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF3B82F6))
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
                         Text(
                             text = "共享文件夹路径",
                             color = Color(0xFFE4E4EF),
@@ -349,8 +377,11 @@ fun TunnelDashboard() {
                         serviceIntent.putExtra("token", tokenText)
                         serviceIntent.putExtra("use_file_server", useFileServer && selectedTab == 0)
                         serviceIntent.putExtra("share_path", sharePath)
+                        
+                        // 适配点：将“是否允许公网上传”的状态作为 Extra 传递给 TunnelService
+                        serviceIntent.putExtra("allow_upload", allowUpload && selectedTab == 0)
 
-                        LogManager.addLog("UI", "用户点击了[启动隧道]按钮，端口: $portText")
+                        LogManager.addLog("UI", "用户点击了[启动隧道]按钮，端口: $portText，共享上传: $allowUpload")
 
                         try {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
