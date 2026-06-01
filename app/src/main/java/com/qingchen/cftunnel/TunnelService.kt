@@ -22,10 +22,10 @@ class TunnelService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        LogManager.addLog("Service", "onCreate()：前台保活服务正在被安卓系统初始化...")
         createNotificationChannel()
         val notification = buildNotification("准备启动穿透内核...")
         
-        // 适配点：对应 manifest 声明的 dataSync 类型启动
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 notificationId,
@@ -35,12 +35,15 @@ class TunnelService : Service() {
         } else {
             startForeground(notificationId, notification)
         }
+        LogManager.addLog("Service", "startForeground()：前台保活服务已挂载到状态栏")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val mode = intent?.getIntExtra("mode", 0) ?: 0
         val port = intent?.getStringExtra("port") ?: "8080"
         val token = intent?.getStringExtra("token") ?: ""
+
+        LogManager.addLog("Service", "收到启动指令：mode=${if(mode==0)"免域名" else "永久"}, port=$port")
 
         stopTunnelProcess()
         TunnelManager.startTunnel()
@@ -52,13 +55,17 @@ class TunnelService : Service() {
                 val fileSO = File(nativeDir, "libcloudflared.so")
 
                 if (!fileSO.exists()) {
+                    LogManager.addLog("Service_Error", "libcloudflared.so 动态库在本地 nativeLibraryDir 目录中未找到")
                     TunnelManager.updateStatus("错误: 内核动态库不存在于系统目录")
                     return@thread
                 }
 
                 try {
+                    LogManager.addLog("Service", "正在尝试对底层内核授予可执行权限 (r-xr-xr-x)...")
                     fileSO.setExecutable(true, false)
+                    LogManager.addLog("Service", "授权完成，权限状态：rwx=${fileSO.canExecute()}")
                 } catch (e: Exception) {
+                    LogManager.addLog("Service_Error", "授权失败: ${e.message}")
                     lastLogs.add("授权执行失败: ${e.message}")
                 }
 
@@ -68,19 +75,25 @@ class TunnelService : Service() {
                     listOf(fileSO.absolutePath, "tunnel", "run", "--token", token)
                 }
 
+                LogManager.addLog("Service", "构建执行进程指令: ${command.joinToString(" ")}")
+
                 val pb = ProcessBuilder(command)
                 pb.environment()["HOME"] = filesDir.absolutePath
                 pb.redirectErrorStream(true)
 
+                LogManager.addLog("Service", "正在拉起 ProcessBuilder 执行底层二进制进程...")
                 val proc = pb.start()
                 process = proc
+                LogManager.addLog("Service", "成功拉起二进制内核进程，PID = ${getProcessId(proc)}")
 
                 val reader = BufferedReader(InputStreamReader(proc.inputStream))
                 var line: String?
                 
                 while (reader.readLine().also { line = it } != null) {
                     val logLine = line ?: break
-                    android.util.Log.d("cftunnel_kernel", logLine)
+                    
+                    // 核心拦截点：将 cloudflared 进程的每一行标准输出/标准错误全量注入全局日志中
+                    LogManager.addLog("Kernel", logLine)
 
                     if (lastLogs.size >= 5) {
                         lastLogs.removeAt(0)
@@ -104,6 +117,7 @@ class TunnelService : Service() {
                 }
 
                 val exitCode = proc.waitFor()
+                LogManager.addLog("Service", "内核进程执行结束，退出码（Exit Code）: $exitCode")
                 if (exitCode != 0) {
                     val errorSummary = lastLogs.joinToString("\n")
                     TunnelManager.updateStatus("内核退出 ($exitCode)。最新日志:\n$errorSummary")
@@ -111,6 +125,7 @@ class TunnelService : Service() {
 
             } catch (e: Exception) {
                 val errorSummary = lastLogs.joinToString("\n")
+                LogManager.addLog("Service_Error", "内核运行过程中抛出未捕获异常:\n${e.message}")
                 TunnelManager.updateStatus("启动发生异常:\n${e.message}\n$errorSummary")
             } finally {
                 TunnelManager.stopTunnel()
@@ -125,12 +140,22 @@ class TunnelService : Service() {
         try {
             process?.destroy()
             process = null
+            LogManager.addLog("Service", "已向内核进程发送销毁信号 (SIGKILL/destroy)")
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
+    private fun getProcessId(p: Process): String {
+        return try {
+            p.toString().substringAfter("pid=").substringBefore(",")
+        } catch (e: Exception) {
+            "Unknown"
+        }
+    }
+
     override fun onDestroy() {
+        LogManager.addLog("Service", "onDestroy()：后台保活服务生命周期结束，正在执行资源回收...")
         stopTunnelProcess()
         TunnelManager.stopTunnel()
         super.onDestroy()
