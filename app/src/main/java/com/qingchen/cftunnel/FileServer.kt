@@ -13,7 +13,7 @@ object FileServer {
     var currentPath: String = ""
     var isUploadAllowed: Boolean = false
     
-    // 新增：全局密码控制字段
+    // 全局密码控制字段
     var isAuthEnabled: Boolean = false
     var authPasswordStr: String = ""
 
@@ -108,50 +108,38 @@ object FileServer {
                 reqPath = reqPath.substringBefore("?")
             }
 
-            // --- 终极注入点 1：公网访问安全密码校验 (HTTP Basic Auth) ---
+            // --- 核心安全重构点：Cookie 会话级公网密码校验（抛弃灰色 Basic Auth，支持自定义超美密码页） ---
             if (isAuthEnabled && authPasswordStr.isNotEmpty()) {
                 var isAuthorized = false
-                var authHeader: String? = null
+                var cookieHeader: String? = null
                 
-                // 从请求头中检索 Authorization 授权头
+                // 从 HTTP Headers 中获取 Cookie 字段
                 for (h in headers) {
-                    if (h.lowercase().startsWith("authorization:")) {
-                        authHeader = h.substringAfter(":").trim()
+                    if (h.lowercase().startsWith("cookie:")) {
+                        cookieHeader = h.substringAfter(":").trim()
                     }
                 }
                 
-                if (authHeader != null && authHeader.startsWith("Basic ", ignoreCase = true)) {
-                    val base64Credentials = authHeader.substring(6).trim()
-                    try {
-                        // 使用安卓内置的 Base64 库进行解码
-                        val decodedBytes = android.util.Base64.decode(base64Credentials, android.util.Base64.DEFAULT)
-                        val credentials = String(decodedBytes, Charsets.UTF_8)
-                        // HTTP 规范标准格式为 "用户名:密码"，此处提取出密码进行比对
-                        val credentialParts = credentials.split(":")
-                        if (credentialParts.size >= 2) {
-                            val clientPassword = credentialParts[1]
-                            if (clientPassword == authPasswordStr) {
+                // 校验 Cookie 中是否含有正确的 cftunnel_auth 密码字段
+                if (cookieHeader != null) {
+                    val cookies = cookieHeader.split(";")
+                    for (c in cookies) {
+                        val kv = c.trim().split("=")
+                        if (kv.size == 2 && kv[0] == "cftunnel_auth") {
+                            val clientSavedPassword = URLDecoder.decode(kv[1], "UTF-8")
+                            if (clientSavedPassword == authPasswordStr) {
                                 isAuthorized = true
                             }
                         }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
                     }
                 }
                 
-                // 如果未授权，向浏览器发送 401 挑战信息，强行弹出原生登录弹窗
+                // 如果未授权，直接阻断，并在当前页面渲染自定义的“极简密码输入卡片”
                 if (!isAuthorized) {
-                    LogManager.addLog("FileServer_Warning", "拒绝匿名公网访问：触发密码保护机制，已发送认证挑战。")
-                    val challengeHeader = "HTTP/1.1 401 Unauthorized\r\n" +
-                            "WWW-Authenticate: Basic realm=\"cftunnel Private File Sharing\"\r\n" +
-                            "Content-Type: text/plain; charset=utf-8\r\n" +
-                            "Content-Length: 32\r\n" +
-                            "Connection: close\r\n" +
-                            "\r\n"
-                    out.write(challengeHeader.toByteArray(Charsets.UTF_8))
-                    out.write("401 Unauthorized: Access Denied.".toByteArray(Charsets.UTF_8))
-                    out.flush()
-                    return // 直接拦截阻断，后续逻辑绝不执行
+                    LogManager.addLog("FileServer_Warning", "匿名访问已被成功拦截，正在向公网渲染 cftunnel 极简密码保护页...")
+                    val loginHtml = buildLoginHtml()
+                    sendTextResponse(out, 200, "OK", loginHtml, "text/html; charset=utf-8")
+                    return
                 }
             }
 
@@ -203,6 +191,7 @@ object FileServer {
                     return
                 }
 
+                // 针对多盘模式，解析出上传的目标物理路径
                 val uploadBaseDir: String
                 val uploadCleanPath: String
                 var cleanUploadRelDir = destDirRel.trimStart('/')
@@ -224,6 +213,7 @@ object FileServer {
                     uploadCleanPath = cleanUploadRelDir
                 }
 
+                // 提取 Content-Length
                 var contentLength = -1L
                 for (h in headers) {
                     if (h.lowercase().startsWith("content-length:")) {
@@ -263,7 +253,7 @@ object FileServer {
                 return
             }
 
-            // --- 常规路由 C：处理常规 GET 文件浏览和下载 ---
+            // --- 常规路由 C：处理非主页、非上传的常规 GET 文件浏览和下载 ---
             var cleanPath = reqPath.trimStart('/')
             if (cleanPath.contains("..")) {
                 cleanPath = cleanPath.replace("..", "")
@@ -318,6 +308,52 @@ object FileServer {
             try { out?.close() } catch (e: Exception) {}
             try { socket.close() } catch (e: Exception) {}
         }
+    }
+
+    // 绘制自定义的“暗黑科技感”极简密码认证网页
+    private fun buildLoginHtml(): String {
+        val sb = StringBuilder()
+        sb.append("<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>")
+        sb.append("<title>cftunnel 安全认证</title>")
+        sb.append("<style>")
+        sb.append("body { font-family: -apple-system, sans-serif; background: #0f0f14; color: #e4e4ef; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }")
+        sb.append(".card { background: #161622; border: 1.5px solid #2a2a3a; border-radius: 12.5dp; border-radius: 12px; padding: 30px; width: 100%; max-width: 320px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.6); }")
+        sb.append("h3 { color: #60a5fa; margin: 0 0 10px 0; font-size: 18px; font-weight: bold; }")
+        sb.append("p { color: #8888a0; font-size: 12px; margin-bottom: 22px; line-height: 16px; }")
+        sb.append("input { background: #0f0f14; border: 1.5px solid #2a2a3a; border-radius: 8px; padding: 12px 14px; color: white; width: 100%; font-size: 14px; box-sizing: border-box; outline: none; text-align: center; margin-bottom: 16px; transition: 0.15s; }")
+        sb.append("input:focus { border-color: #3b82f6; }")
+        sb.append("button { background: #3b82f6; color: white; border: none; padding: 11px 0; border-radius: 8px; font-weight: bold; width: 100%; cursor: pointer; font-size: 14px; transition: 0.15s; }")
+        sb.append("button:hover { background: #2563eb; }")
+        sb.append("#error { color: #ef4444; font-size: 11px; margin-top: 12px; font-weight: bold; display: none; }")
+        sb.append("</style></head><body>")
+        sb.append("<div class='card'>")
+        sb.append("<h3>🔒 私密网盘访问认证</h3>")
+        sb.append("<p>当前共享路径已被加密保障<br/>请输入安全访问密码</p>")
+        // 密码输入框（移除了用户名，且支持回车直接验证）
+        sb.append("<input type='password' id='passInput' placeholder='请输入访问密码' onkeydown='if(event.key===\"Enter\") verify()'>")
+        sb.append("<button onclick='verify()'>验证并登录</button>")
+        sb.append("<div id='error'></div>")
+        sb.append("</div>")
+        
+        sb.append("<script>")
+        // 提示信息逻辑：如果 Cookie 已经包含该字段但页面还是被拦在登录页，说明是输入了错误密码
+        sb.append("if (document.cookie.indexOf('cftunnel_auth') !== -1) {")
+        sb.append("  var errorDiv = document.getElementById('error');")
+        sb.append("  errorDiv.innerText = '❌ 密码错误，请重新输入！';")
+        sb.append("  errorDiv.style.display = 'block';")
+        sb.append("}")
+        // 写入 30 天 Cookie 的 js 控制引擎
+        sb.append("function verify() {")
+        sb.append("  var pass = document.getElementById('passInput').value;")
+        sb.append("  if (!pass) { alert('请输入密码！'); return; }")
+        sb.append("  var d = new Date();")
+        sb.append("  d.setTime(d.getTime() + (30 * 24 * 60 * 60 * 1000));") // 保留 30 天免密
+        sb.append("  document.cookie = 'cftunnel_auth=' + encodeURIComponent(pass) + ';path=/;expires=' + d.toUTCString();")
+        sb.append("  location.reload();")
+        sb.append("}")
+        sb.append("</script>")
+        sb.append("</body></html>")
+        return sb.toString()
     }
 
     private fun buildMultiRootHtml(paths: List<String>): String {
