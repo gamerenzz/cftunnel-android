@@ -59,7 +59,6 @@ object FileServer {
             reader = BufferedReader(InputStreamReader(socket.getInputStream()))
             out = BufferedOutputStream(socket.getOutputStream())
 
-            // 1. 读取 HTTP 请求首行
             val reqLine = reader.readLine() ?: return
             val parts = reqLine.split(" ")
             if (parts.size < 2 || parts[0] != "GET") {
@@ -67,30 +66,38 @@ object FileServer {
                 return
             }
 
-            // 2. 解码 URL 路径并过滤
             var reqPath = URLDecoder.decode(parts[1], "UTF-8")
             if (reqPath.contains("?")) {
                 reqPath = reqPath.substringBefore("?")
             }
 
-            // 核心修复点：强行去除开头的所有斜杠，并过滤掉 ".." 路径，防止 Java 判定其为绝对路径或进行目录穿越
             var cleanPath = reqPath.trimStart('/')
             if (cleanPath.contains("..")) {
                 cleanPath = cleanPath.replace("..", "")
             }
 
             val targetFile = File(baseDir, cleanPath)
+            
+            // 诊断日志 A：打印请求解析链路和物理路径判定结果
+            LogManager.addLog("FileServer", "请求: ${parts[1]} -> 解码路径: $reqPath -> 物理绝对路径: ${targetFile.absolutePath} (存在: ${targetFile.exists()}, 文件夹: ${targetFile.isDirectory})")
+
             if (!targetFile.exists()) {
                 sendTextResponse(out, 404, "Not Found", "您请求的文件或文件夹不存在")
                 return
             }
 
             if (targetFile.isDirectory) {
-                // 3. 返回动态渲染的网页文件列表 HTML
+                // 诊断日志 B：诊断 listFiles 是否被安卓沙盒系统拦截并返回 null
+                val fileList = targetFile.listFiles()
+                if (fileList == null) {
+                    LogManager.addLog("FileServer_Error", "⚠️ 读取失败！安卓系统拦截了该目录的文件读取，请检查 App 存储访问权限。")
+                } else {
+                    LogManager.addLog("FileServer", "成功读取文件夹，内部子项数量: ${fileList.size}")
+                }
+
                 val html = buildDirectoryHtml(reqPath, targetFile)
                 sendTextResponse(out, 200, "OK", html, "text/html; charset=utf-8")
             } else {
-                // 4. 流式文件传输（下载）
                 sendFileResponse(out, targetFile)
             }
 
@@ -120,7 +127,6 @@ object FileServer {
         sb.append(".back-btn { display: inline-block; padding: 6px 12px; background: #2a2a3a; border-radius: 6px; font-size: 13px; margin-bottom: 15px; color: #e4e4ef; }")
         sb.append("</style></head><body>")
 
-        // 统一格式化显示路径
         val displayRelative = if (relative.isEmpty() || relative == "/") "/" else relative
         sb.append("<h2>📁 当前共享路径: $displayRelative</h2>")
 
@@ -138,7 +144,6 @@ object FileServer {
         } else {
             files.forEach { file ->
                 val icon = if (file.isDirectory) "📁 " else "📄 "
-                // 拼接子项链接时保持格式统一
                 val link = "$relativeClean/${file.name}".replace("//", "/")
                 sb.append("<li><a href='$link'>$icon${file.name}</a></li>")
             }
