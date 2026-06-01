@@ -54,23 +54,27 @@ fun TunnelDashboard() {
     val sharedPrefs = remember { context.getSharedPreferences("cftunnel_prefs", Context.MODE_PRIVATE) }
 
     var selectedTab by remember { mutableStateOf(0) }
-    var portText by remember { mutableStateOf(sharedPrefs.getString("local_port", "8080") ?: "8080") }
+    var portText by remember { mutableStateOf(sharedPrefs.getString("local_port", "8181") ?: "8181") }
     var tokenText by remember { mutableStateOf(sharedPrefs.getString("tunnel_token", "") ?: "") }
 
-    // 状态观察
+    // 新增：内嵌文件服务器配置状态与持久化
+    var useFileServer by remember { mutableStateOf(sharedPrefs.getBoolean("use_file_server", true)) }
+    var sharePath by remember { mutableStateOf(sharedPrefs.getString("share_path", "/storage/emulated/0/Download") ?: "/storage/emulated/0/Download") }
+
+    // 运行状态与日志
     val isRunning by TunnelManager.isRunning.collectAsState()
     val generatedUrl by TunnelManager.tunnelUrl.collectAsState()
     val statusText by TunnelManager.statusText.collectAsState()
-
-    // 日志与调试折叠状态
     val logs by LogManager.logs.collectAsState()
     var showLogs by remember { mutableStateOf(false) }
     val lazyListState = rememberLazyListState()
 
+    // 自动保存输入
     LaunchedEffect(portText) { sharedPrefs.edit().putString("local_port", portText).apply() }
     LaunchedEffect(tokenText) { sharedPrefs.edit().putString("tunnel_token", tokenText).apply() }
+    LaunchedEffect(useFileServer) { sharedPrefs.edit().putBoolean("use_file_server", useFileServer).apply() }
+    LaunchedEffect(sharePath) { sharedPrefs.edit().putString("share_path", sharePath).apply() }
 
-    // 当有新日志产生时，自动滚动到最底部
     LaunchedEffect(logs.size) {
         if (logs.isNotEmpty()) {
             lazyListState.animateScrollToItem(logs.size - 1)
@@ -141,10 +145,103 @@ fun TunnelDashboard() {
                             focusedTextColor = Color.White,
                             unfocusedTextColor = Color.White
                         ),
-                        placeholder = { Text("请输入端口，如 8080", color = Color(0xFF8888A0)) },
+                        placeholder = { Text("请输入端口，如 8181", color = Color(0xFF8888A0)) },
                         singleLine = true,
                         enabled = !isRunning
                     )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // --- 新增：内嵌文件服务器开关与路径配置卡片 ---
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "内嵌网页文件共享",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "一键将指定文件夹分享到公网",
+                                color = Color(0xFF8888A0),
+                                fontSize = 11.sp
+                            )
+                        }
+                        Switch(
+                            checked = useFileServer,
+                            onCheckedChange = { if (!isRunning) useFileServer = it },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF3B82F6))
+                        )
+                    }
+
+                    if (useFileServer) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "共享文件夹路径",
+                            color = Color(0xFFE4E4EF),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+                        OutlinedTextField(
+                            value = sharePath,
+                            onValueChange = { if (!isRunning) sharePath = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF3B82F6),
+                                unfocusedBorderColor = Color(0xFF2A2A3A),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White
+                            ),
+                            placeholder = { Text("请指定共享路径，例如 /storage/emulated/0", color = Color(0xFF8888A0)) },
+                            singleLine = true,
+                            enabled = !isRunning
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // 快速填入按钮行
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            val btnModifier = Modifier.weight(1f)
+                            val btnColors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2A2A3A))
+                            val btnShape = RoundedCornerShape(6.dp)
+
+                            Button(
+                                onClick = { if (!isRunning) sharePath = "/storage/emulated/0/Download" },
+                                modifier = btnModifier,
+                                colors = btnColors,
+                                shape = btnShape,
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                Text("填入下载目录", fontSize = 11.sp, color = Color.White)
+                            }
+                            Button(
+                                onClick = { if (!isRunning) sharePath = "/storage/emulated/0/Documents" },
+                                modifier = btnModifier,
+                                colors = btnColors,
+                                shape = btnShape,
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                Text("填入文档目录", fontSize = 11.sp, color = Color.White)
+                            }
+                            Button(
+                                onClick = { if (!isRunning) sharePath = "/storage/emulated/0" },
+                                modifier = btnModifier,
+                                colors = btnColors,
+                                shape = btnShape,
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                Text("填入整机存储", fontSize = 11.sp, color = Color.White)
+                            }
+                        }
+                    }
 
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -207,8 +304,12 @@ fun TunnelDashboard() {
                         serviceIntent.putExtra("mode", selectedTab)
                         serviceIntent.putExtra("port", portText)
                         serviceIntent.putExtra("token", tokenText)
+                        
+                        // 注入内嵌文件服务器所需参数
+                        serviceIntent.putExtra("use_file_server", useFileServer && selectedTab == 0)
+                        serviceIntent.putExtra("share_path", sharePath)
 
-                        LogManager.addLog("UI", "用户点击了[启动隧道]按钮，端口: $portText")
+                        LogManager.addLog("UI", "用户点击了[启动隧道]按钮，目标端口: $portText，模式: ${if(selectedTab==0)"免域名" else "永久"}")
 
                         try {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -326,7 +427,6 @@ fun TunnelDashboard() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // --- 核心调试日志卡片（新增，支持展开折叠、长按选择与一键复制全部） ---
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
@@ -356,7 +456,6 @@ fun TunnelDashboard() {
                 if (showLogs) {
                     Spacer(modifier = Modifier.height(10.dp))
                     
-                    // 日志输出框（SelectionContainer 允许用户用安卓系统原生选择条选中任何日志行）
                     SelectionContainer {
                         LazyColumn(
                             state = lazyListState,
@@ -369,9 +468,9 @@ fun TunnelDashboard() {
                         ) {
                             items(logs) { logLine ->
                                 val color = when {
-                                    logLine.contains("[Kernel]") -> Color(0xFF34D399) // 绿色：内核正常日志
-                                    logLine.contains("Error") || logLine.contains("失败") || logLine.contains("退出") -> Color(0xFFF87171) // 红色：警告/错误
-                                    else -> Color(0xFF9CA3AF) // 灰色：系统基础流
+                                    logLine.contains("[Kernel]") -> Color(0xFF34D399)
+                                    logLine.contains("Error") || logLine.contains("失败") || logLine.contains("退出") -> Color(0xFFF87171)
+                                    else -> Color(0xFF9CA3AF)
                                 }
                                 Text(
                                     text = logLine,
