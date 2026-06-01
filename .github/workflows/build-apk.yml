@@ -1,6 +1,7 @@
 name: Build Android APK
 
 on:
+
   workflow_dispatch: # 支持手动触发构建
 
 jobs:
@@ -11,14 +12,14 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # 1. 配置 Go 环境以编译 cloudflared
+    # 1. 配置 Go 环境
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: '1.22'
 
-    # 2. 编译并生成适用于 Android 的 libcloudflared.so
-    - name: Compile cloudflared for Android ARM64
+    # 2. 编译并生成适用于 Android 的 libcloudflared.so (启用 CGO 解决安卓 DNS 解析 bug)
+    - name: Compile cloudflared for Android ARM64 with CGO
       run: |
         # 创建 Android 动态库目录
         mkdir -p app/src/main/jniLibs/arm64-v8a
@@ -27,12 +28,31 @@ jobs:
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         cd cloudflared-src
         
-        # 交叉编译
-        echo "Starting compilation for Android ARM64..."
-        CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
+        # 自动定位 GitHub Action 宿主机上的 Android NDK 路径
+        NDK_PATH=$ANDROID_NDK_LATEST_HOME
+        echo "Using Android NDK Path: $NDK_PATH"
+        
+        # 寻找适用于 Android ARM64 (API 26) 的交叉编译器 Clang
+        CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android26-clang" | head -n 1)
+        if [ -z "$CLANG_PATH" ]; then
+          # 备用方案：如果找不到 API 26，自动模糊匹配任意安卓 ARM64 编译器
+          CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android*-clang" | head -n 1)
+        fi
+        
+        echo "Using Cross Compiler CC: $CLANG_PATH"
+        
+        # 开启 CGO 并指定安卓交叉编译器
+        export CC=$CLANG_PATH
+        export CGO_ENABLED=1
+        export GOOS=android
+        export GOARCH=arm64
+        
+        # 执行编译
+        echo "Starting CGO compilation for Android ARM64..."
+        go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
-        echo "Compilation completed. File size details:"
+        echo "CGO Compilation completed. File size details:"
         ls -lh app/src/main/jniLibs/arm64-v8a/libcloudflared.so
 
     # 3. 配置 Java 运行环境
@@ -47,7 +67,6 @@ jobs:
     - name: Generate Gradle Wrapper
       run: |
         if [ ! -f "gradlew" ]; then
-          # 显式指定 gradle 版本为 8.5，防止自动下载不兼容的 9.x 版本
           gradle wrapper --gradle-version 8.5 --distribution-type bin
         fi
         chmod +x gradlew
