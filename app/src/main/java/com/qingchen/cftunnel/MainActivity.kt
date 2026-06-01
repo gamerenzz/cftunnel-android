@@ -2,6 +2,7 @@ package com.qingchen.cftunnel
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -21,7 +22,6 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -47,19 +47,14 @@ fun TunnelDashboard() {
     val clipboardManager = LocalClipboardManager.current
     val sharedPrefs = remember { context.getSharedPreferences("cftunnel_prefs", Context.MODE_PRIVATE) }
 
-    // 双标签
     var selectedTab by remember { mutableStateOf(0) }
-
-    // 输入框状态
     var portText by remember { mutableStateOf(sharedPrefs.getString("local_port", "8080") ?: "8080") }
     var tokenText by remember { mutableStateOf(sharedPrefs.getString("tunnel_token", "") ?: "") }
 
-    // 实时的全局进程状态监听
     val isRunning by TunnelManager.isRunning.collectAsState()
     val generatedUrl by TunnelManager.tunnelUrl.collectAsState()
     val statusText by TunnelManager.statusText.collectAsState()
 
-    // 自动保存输入
     LaunchedEffect(portText) { sharedPrefs.edit().putString("local_port", portText).apply() }
     LaunchedEffect(tokenText) { sharedPrefs.edit().putString("tunnel_token", tokenText).apply() }
 
@@ -190,13 +185,17 @@ fun TunnelDashboard() {
                             return@Button
                         }
                         
-                        // 启动前台服务
                         serviceIntent.putExtra("mode", selectedTab)
                         serviceIntent.putExtra("port", portText)
                         serviceIntent.putExtra("token", tokenText)
-                        context.startService(serviceIntent)
+
+                        // 适配点：高版本安卓启动前台服务必须使用 startForegroundService
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            context.startForegroundService(serviceIntent)
+                        } else {
+                            context.startService(serviceIntent)
+                        }
                     } else {
-                        // 停止前台服务
                         context.stopService(serviceIntent)
                     }
                 },
