@@ -10,7 +10,7 @@ object FileServer {
     private var serverSocket: ServerSocket? = null
     private var isRunning = false
     var currentPath: String = ""
-    var isUploadAllowed: Boolean = false // 全局安全控制开关
+    var isUploadAllowed: Boolean = false
 
     fun start(port: Int, path: String, allowUpload: Boolean): Boolean {
         return try {
@@ -35,7 +35,7 @@ object FileServer {
                     }
                 }
             }
-            LogManager.addLog("FileServer", "内嵌网页文件服务器启动成功！路径: $path (允许公网上传: $allowUpload)")
+            LogManager.addLog("FileServer", "内嵌网页文件服务器启动成功！路径列表: $path (允许公网上传: $allowUpload)")
             true
         } catch (e: Exception) {
             LogManager.addLog("FileServer_Error", "内嵌文件服务器启动失败，原因: ${e.message}")
@@ -54,7 +54,6 @@ object FileServer {
         }
     }
 
-    // 基于状态机的 HTTP 头部字节流解析器，防止传统 BufferedReader 预读缓冲区造成文件流字节丢失受损
     private fun readHeaders(inputStream: InputStream): Pair<List<String>, Int> {
         val headers = ArrayList<String>()
         val headerBytes = ByteArrayOutputStream()
@@ -81,7 +80,7 @@ object FileServer {
         return Pair(lines, byteCount)
     }
 
-    private fun handleClient(socket: Socket, baseDir: String) {
+    private fun handleClient(socket: Socket, rawPaths: String) {
         var rawIn: InputStream? = null
         var out: BufferedOutputStream? = null
         try {
@@ -101,20 +100,58 @@ object FileServer {
                 reqPath = reqPath.substringBefore("?")
             }
 
+            // 解析多个物理路径列表 (分号拼合)
+            val sharedPaths = rawPaths.split(";").map { it.trim() }.filter { it.isNotEmpty() }
+            if (sharedPaths.isEmpty()) {
+                sendTextResponse(out, 500, "Internal Error", "未配置有效的本地共享目录")
+                return
+            }
+
+            val isMultiRoot = sharedPaths.size > 1
+
+            // --- 路由分发机制 A：处理虚拟多根目录的主页渲染 (isMultiRoot == true 且请求为 "/") ---
+            if (isMultiRoot && (reqPath == "/" || reqPath.isEmpty())) {
+                if (method == "POST") {
+                    sendTextResponse(out, 403, "Forbidden", "虚拟主目录不支持直接上传，请点击并进入指定文件夹上传。")
+                    return
+                }
+                val html = buildMultiRootHtml(sharedPaths)
+                sendTextResponse(out, 200, "OK", html, "text/html; charset=utf-8")
+                return
+            }
+
+            // 定位目标物理基准目录 (Base Directory) 与相对路径 (Clean Path)
             var cleanPath = reqPath.trimStart('/')
             if (cleanPath.contains("..")) {
                 cleanPath = cleanPath.replace("..", "")
             }
 
-            // --- 核心逻辑分流：处理公网 POST 文件上传 ---
+            val targetBaseDir: String
+            val targetCleanPath: String
+
+            if (isMultiRoot) {
+                // 如果是多盘模式下，请求路径的第一层是“虚拟盘符”（如 /Download/abc.txt 中的 Download）
+                val firstSegment = cleanPath.substringBefore("/")
+                val matchedPath = sharedPaths.firstOrNull { File(it).name == firstSegment }
+                
+                if (matchedPath == null) {
+                    sendTextResponse(out, 404, "Not Found", "无法在虚拟多盘列表中定位到该盘符: $firstSegment")
+                    return
+                }
+                targetBaseDir = matchedPath
+                targetCleanPath = cleanPath.substringAfter("/", "")
+            } else {
+                targetBaseDir = sharedPaths[0]
+                targetCleanPath = cleanPath
+            }
+
+            // --- 路由分发机制 B：处理公网文件上传 ---
             if (method == "POST" && reqPath.startsWith("/upload")) {
                 if (!isUploadAllowed) {
-                    LogManager.addLog("FileServer_Warning", "拒绝非法上传：公网上传权限未开启！")
                     sendTextResponse(out, 403, "Forbidden", "手机端未开启公网上传文件权限。")
                     return
                 }
 
-                // 从 URL 参数中解析出上传文件的名字 filename 和保存路径 dir
                 val query = parts[1].substringAfter("?", "")
                 var filename = ""
                 var destDirRel = ""
@@ -132,8 +169,30 @@ object FileServer {
                 }
 
                 if (filename.isEmpty()) {
-                    sendTextResponse(out, 400, "Bad Request", "缺失上传文件名参数 filename")
+                    sendTextResponse(out, 400, "Bad Request", "缺失上传参数 filename")
                     return
+                }
+
+                // 针对多盘模式，解析出上传路径在哪个子盘中
+                val uploadBaseDir: String
+                val uploadCleanPath: String
+                var cleanUploadRelDir = destDirRel.trimStart('/')
+                if (cleanUploadRelDir.contains("..")) {
+                    cleanUploadRelDir = cleanUploadRelDir.replace("..", "")
+                }
+
+                if (isMultiRoot) {
+                    val firstSegment = cleanUploadRelDir.substringBefore("/")
+                    val matchedPath = sharedPaths.firstOrNull { File(it).name == firstSegment }
+                    if (matchedPath == null) {
+                        sendTextResponse(out, 404, "Not Found", "定位上传盘符失败")
+                        return
+                    }
+                    uploadBaseDir = matchedPath
+                    uploadCleanPath = cleanUploadRelDir.substringAfter("/", "")
+                } else {
+                    uploadBaseDir = sharedPaths[0]
+                    uploadCleanPath = cleanUploadRelDir
                 }
 
                 // 提取 Content-Length
@@ -145,24 +204,18 @@ object FileServer {
                 }
 
                 if (contentLength <= 0) {
-                    sendTextResponse(out, 400, "Bad Request", "上传数据包内容长度 Content-Length 异常")
+                    sendTextResponse(out, 400, "Bad Request", "上传数据包长度 Content-Length 异常")
                     return
                 }
 
-                // 路径对齐与创建
-                var cleanDestDir = destDirRel.trimStart('/')
-                if (cleanDestDir.contains("..")) {
-                    cleanDestDir = cleanDestDir.replace("..", "")
-                }
-                val finalDir = File(baseDir, cleanDestDir)
+                val finalDir = File(uploadBaseDir, uploadCleanPath)
                 if (!finalDir.exists()) {
                     finalDir.mkdirs()
                 }
 
                 val destFile = File(finalDir, filename)
-                LogManager.addLog("FileServer", "公网开始上传文件: $filename -> 目标路径: ${destFile.absolutePath} (大小: ${contentLength} 字节)")
+                LogManager.addLog("FileServer", "公网开始上传: $filename -> 目标路径: ${destFile.absolutePath} (大小: $contentLength 字节)")
 
-                // 流式安全接收与落盘
                 val fos = FileOutputStream(destFile)
                 val buffer = ByteArray(8192)
                 var totalBytesRead = 0L
@@ -177,14 +230,14 @@ object FileServer {
                 fos.flush()
                 fos.close()
 
-                LogManager.addLog("FileServer", "公网文件上传成功！完成落盘: ${destFile.name} (大小: $totalBytesRead 字节)")
+                LogManager.addLog("FileServer", "公网文件上传成功！落盘: ${destFile.name}")
                 sendTextResponse(out, 200, "OK", "上传成功")
                 return
             }
 
-            // --- 核心逻辑分流：处理 GET 请求浏览和下载 ---
-            val targetFile = File(baseDir, cleanPath)
-            LogManager.addLog("FileServer", "请求: ${parts[1]} -> 物理绝对路径: ${targetFile.absolutePath} (存在: ${targetFile.exists()}, 文件夹: ${targetFile.isDirectory})")
+            // --- 路由分发机制 C：处理文件浏览和下载 ---
+            val targetFile = File(targetBaseDir, targetCleanPath)
+            LogManager.addLog("FileServer", "请求: ${parts[1]} -> 目标物理绝对路径: ${targetFile.absolutePath} (存在: ${targetFile.exists()}, 文件夹: ${targetFile.isDirectory})")
 
             if (!targetFile.exists()) {
                 sendTextResponse(out, 404, "Not Found", "您请求的文件或文件夹不存在")
@@ -194,12 +247,12 @@ object FileServer {
             if (targetFile.isDirectory) {
                 val fileList = targetFile.listFiles()
                 if (fileList == null) {
-                    LogManager.addLog("FileServer_Error", "⚠️ 读取失败！系统拦截了该目录读取权限。")
+                    LogManager.addLog("FileServer_Error", "⚠️ 物理读取权限受阻！")
                 } else {
-                    LogManager.addLog("FileServer", "成功读取文件夹，内部子项数量: ${fileList.size}")
+                    LogManager.addLog("FileServer", "成功读取文件夹，子项数量: ${fileList.size}")
                 }
 
-                val html = buildDirectoryHtml(reqPath, targetFile)
+                val html = buildDirectoryHtml(reqPath, targetFile, isMultiRoot)
                 sendTextResponse(out, 200, "OK", html, "text/html; charset=utf-8")
             } else {
                 sendFileResponse(out, targetFile)
@@ -217,7 +270,30 @@ object FileServer {
         }
     }
 
-    private fun buildDirectoryHtml(relative: String, dir: File): String {
+    // 虚拟多盘主界面 HTML 渲染器
+    private fun buildMultiRootHtml(paths: List<String>): String {
+        val sb = StringBuilder()
+        sb.append("<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>")
+        sb.append("<title>cftunnel 虚拟多盘共享系统</title>")
+        sb.append("<style>")
+        sb.append("body { font-family: -apple-system, sans-serif; background: #0f0f14; color: #e4e4ef; padding: 20px; margin: 0; }")
+        sb.append("h2 { color: #60a5fa; font-size: 18px; border-bottom: 1.5px solid #2a2a3a; padding-bottom: 10px; }")
+        sb.append("ul { list-style: none; padding: 0; margin: 0; }")
+        sb.append("li { padding: 14px; border-bottom: 1.5px solid #1c1c28; display: flex; align-items: center; }")
+        sb.append("a { color: #60a5fa; text-decoration: none; font-size: 16px; display: block; flex: 1; font-weight: bold; }")
+        sb.append("a:hover { color: #3b82f6; }")
+        sb.append("</style></head><body>")
+        sb.append("<h2>📁 cftunnel 虚拟多盘主页</h2>")
+        sb.append("<ul>")
+        for (p in paths) {
+            val folderName = File(p).name
+            sb.append("<li><a href='/$folderName'>📁 $folderName [本地虚拟挂载盘]</a></li>")
+        }
+        sb.append("</ul></body></html>")
+        return sb.toString()
+    }
+
+    private fun buildDirectoryHtml(relative: String, dir: File, isMultiRoot: Boolean): String {
         val sb = StringBuilder()
         sb.append("<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>")
         sb.append("<title>cftunnel 共享文件系统</title>")
@@ -228,13 +304,12 @@ object FileServer {
         sb.append("li { padding: 12px; border-bottom: 1.5px solid #1c1c28; display: flex; align-items: center; }")
         sb.append("a { color: #60a5fa; text-decoration: none; font-size: 15px; display: block; flex: 1; word-break: break-all; }")
         sb.append("a:hover { color: #3b82f6; }")
-        sb.append(".back-btn { display: inline-block; padding: 6px 12px; background: #2a2a3a; border-radius: 6px; font-size: 13px; margin-bottom: 15px; color: #e4e4ef; }")
+        sb.append(".back-btn { display: inline-block; padding: 6px 12px; background: #2a2a3a; border-radius: 6px; font-size: 13px; margin-bottom: 15px; color: #e4e4ef; text-decoration: none; }")
         sb.append(".upload-card { background: #161622; border: 1.5px dashed #3b82f6; border-radius: 8px; padding: 16px; text-align: center; margin-bottom: 20px; }")
         sb.append(".upload-btn { background: #3b82f6; color: white; border: none; padding: 8px 18px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; margin-top: 10px; }")
         sb.append(".upload-btn:hover { background: #2563eb; }")
         sb.append("</style></head><body>")
 
-        // 统一格式化显示路径
         val displayRelative = if (relative.isEmpty() || relative == "/") "/" else relative
         sb.append("<h2>📁 当前共享路径: $displayRelative</h2>")
 
@@ -245,7 +320,6 @@ object FileServer {
             sb.append("<a class='back-btn' href='$parentLink'>⬅️ 返回上级目录</a>")
         }
 
-        // --- 核心注入点：如果后台允许上传，动态向网页中注入上传组件与 JavaScript 上传控制器 ---
         if (isUploadAllowed) {
             sb.append("<div class='upload-card'>")
             sb.append("<h3 style='margin: 0 0 10px 0; font-size: 14px; color: #60a5fa;'>📤 上传文件到此文件夹</h3>")
@@ -262,7 +336,6 @@ object FileServer {
             sb.append("  var status = document.getElementById('status');")
             sb.append("  status.innerText = '正在上传: ' + file.name + ' (0%) ...';")
             sb.append("  var xhr = new XMLHttpRequest();")
-            // 关键点：将 encodeURIComponent(window.location.pathname) 恢复为原生 window.location.pathname，防止双重 URL 编码导致中文文件夹名字乱码
             sb.append("  var targetUrl = '/upload?filename=' + encodeURIComponent(file.name) + '&dir=' + window.location.pathname;")
             sb.append("  xhr.open('POST', targetUrl, true);")
             sb.append("  xhr.upload.onprogress = function(e) {")
