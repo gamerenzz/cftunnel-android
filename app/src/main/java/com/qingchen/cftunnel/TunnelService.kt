@@ -2,6 +2,7 @@ package com.qingchen.cftunnel
 
 import android.app.*
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -23,11 +24,21 @@ class TunnelService : Service() {
         super.onCreate()
         createNotificationChannel()
         val notification = buildNotification("准备启动穿透内核...")
-        startForeground(notificationId, notification)
+        
+        // 适配点：针对 Android 14+ 系统的特殊启动约束，必须传入对应 Service 声明类型参数
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { // API 34+
+            startForeground(
+                notificationId,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else {
+            startForeground(notificationId, notification)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val mode = intent?.getIntExtra("mode", 0) ?: 0 // 0: 临时, 1: 永久
+        val mode = intent?.getIntExtra("mode", 0) ?: 0
         val port = intent?.getStringExtra("port") ?: "8080"
         val token = intent?.getStringExtra("token") ?: ""
 
@@ -35,24 +46,22 @@ class TunnelService : Service() {
         TunnelManager.startTunnel()
 
         thread {
-            val lastLogs = ArrayList<String>() // 用于收集最后几行日志
+            val lastLogs = ArrayList<String>()
             try {
                 val nativeDir = applicationInfo.nativeLibraryDir
                 val fileSO = File(nativeDir, "libcloudflared.so")
 
                 if (!fileSO.exists()) {
-                    TunnelManager.updateStatus("错误: libcloudflared.so 动态库不存在")
+                    TunnelManager.updateStatus("错误: 内核动态库不存在于系统目录")
                     return@thread
                 }
 
-                // 强制尝试赋予可执行权限，防止部分系统安全策略拦截
                 try {
                     fileSO.setExecutable(true, false)
                 } catch (e: Exception) {
                     lastLogs.add("授权执行失败: ${e.message}")
                 }
 
-                // 构建执行参数
                 val command = if (mode == 0) {
                     listOf(fileSO.absolutePath, "tunnel", "--url", "http://127.0.0.1:$port")
                 } else {
@@ -60,7 +69,6 @@ class TunnelService : Service() {
                 }
 
                 val pb = ProcessBuilder(command)
-                // 关键点：重定向环境变量，防止 Go 写入家目录失败导致闪退
                 pb.environment()["HOME"] = filesDir.absolutePath
                 pb.redirectErrorStream(true)
 
@@ -74,13 +82,11 @@ class TunnelService : Service() {
                     val logLine = line ?: break
                     android.util.Log.d("cftunnel_kernel", logLine)
 
-                    // 缓存最新的 5 行日志
                     if (lastLogs.size >= 5) {
                         lastLogs.removeAt(0)
                     }
                     lastLogs.add(logLine)
 
-                    // 1. 临时隧道：抓取分配的公网 trycloudflare.com 域名
                     if (mode == 0 && logLine.contains("trycloudflare.com")) {
                         val regex = Regex("https://[a-zA-Z0-9-]+\\.trycloudflare\\.com")
                         val matchResult = regex.find(logLine)
@@ -91,14 +97,12 @@ class TunnelService : Service() {
                         }
                     }
                     
-                    // 2. 永久隧道：监听建立成功日志
                     if (mode == 1 && (logLine.contains("Connection established") || logLine.contains("Registered tunnel connection"))) {
                         TunnelManager.updateUrl("已成功连接至永久隧道")
                         updateNotification("永久隧道已成功建立连接")
                     }
                 }
 
-                // 读取结束，判断是否异常退出
                 val exitCode = proc.waitFor()
                 if (exitCode != 0) {
                     val errorSummary = lastLogs.joinToString("\n")
