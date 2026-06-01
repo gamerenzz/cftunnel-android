@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 定义 cftunnel 控制台暗色背景与亮橙色闪电品牌色 -->
+    <color name="ic_launcher_background">#161622</color>
+    <color name="ic_launcher_foreground_color">#F38020</color>
+</resources>
