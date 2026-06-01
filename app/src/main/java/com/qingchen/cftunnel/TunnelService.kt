@@ -45,14 +45,16 @@ class TunnelService : Service() {
         
         val useFileServer = intent?.getBooleanExtra("use_file_server", false) ?: false
         val sharePath = intent?.getStringExtra("share_path") ?: ""
+        
+        // 适配点：接收界面传来的“是否允许公网上传文件”标识
+        val allowUpload = intent?.getBooleanExtra("allow_upload", false) ?: false
 
         stopTunnelProcess()
         TunnelManager.startTunnel()
 
-        // 关键修复点：强制向绝对物理路径写入 DNS 配置文件，确保和 Go 编译器中的补丁路径绝对一致
         val resolvFile = File("/data/data/com.qingchen.cftunnel/files/resolv.conf")
         try {
-            resolvFile.parentFile?.mkdirs() // 确保父文件夹存在
+            resolvFile.parentFile?.mkdirs()
             resolvFile.writeText(
                 "nameserver 114.114.114.114\n" +
                 "nameserver 223.5.5.5\n" +
@@ -65,7 +67,8 @@ class TunnelService : Service() {
         }
 
         if (mode == 0 && useFileServer && sharePath.isNotEmpty()) {
-            val success = FileServer.start(port.toInt(), sharePath)
+            // 适配点：启动时，将 allowUpload 传递给内嵌文件服务器
+            val success = FileServer.start(port.toInt(), sharePath, allowUpload)
             if (!success) {
                 LogManager.addLog("Service_Error", "内嵌文件服务器启动失败，请检查端口是否被占用")
                 TunnelManager.updateStatus("错误: 文件服务器启动失败")
@@ -105,7 +108,7 @@ class TunnelService : Service() {
 
                 val pb = ProcessBuilder(command)
                 pb.environment()["HOME"] = filesDir.absolutePath
-                pb.environment()["GODEBUG"] = "netdns=go" // 允许 Go 引擎使用其内部解析器读取 resolv.conf
+                pb.environment()["GODEBUG"] = "netdns=go"
                 
                 pb.redirectErrorStream(true)
 
