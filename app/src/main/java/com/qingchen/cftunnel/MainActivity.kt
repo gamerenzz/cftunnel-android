@@ -1,7 +1,9 @@
 package com.qingchen.cftunnel
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
@@ -14,9 +16,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,10 +34,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // 关键修复点一：应用启动时，动态向系统申请外部存储读取权限（解决 Android 10+ 无法读取子文件夹的 Bug）
+        checkAndRequestPermissions()
+
         setContent {
             MaterialTheme {
                 Surface(
@@ -43,6 +53,26 @@ class MainActivity : ComponentActivity() {
                     TunnelDashboard()
                 }
             }
+        }
+    }
+
+    private fun checkAndRequestPermissions() {
+        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { // Android 13+
+            arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.READ_MEDIA_AUDIO
+            )
+        } else {
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+
+        val neededPermissions = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (neededPermissions.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, neededPermissions.toTypedArray(), 100)
         }
     }
 }
@@ -65,8 +95,11 @@ fun TunnelDashboard() {
     val statusText by TunnelManager.statusText.collectAsState()
     
     val logs by LogManager.logs.collectAsState()
-    var showLogs by remember { mutableStateOf(true) } // 默认直接展开，方便查看联调
+    var showLogs by remember { mutableStateOf(true) } 
     val lazyListState = rememberLazyListState()
+    
+    // 关键修复点二：为主界面加入 ScrollState。不管日志如何展开，整个界面都支持顺畅滚动，绝不遮挡底部
+    val globalScrollState = rememberScrollState()
 
     LaunchedEffect(portText) { sharedPrefs.edit().putString("local_port", portText).apply() }
     LaunchedEffect(tokenText) { sharedPrefs.edit().putString("tunnel_token", tokenText).apply() }
@@ -84,6 +117,7 @@ fun TunnelDashboard() {
             .fillMaxSize()
             .padding(16.dp)
             .statusBarsPadding()
+            .verticalScroll(globalScrollState) // 激活全局滑动
     ) {
         Text(
             text = "cftunnel 控制台",
@@ -421,7 +455,6 @@ fun TunnelDashboard() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // --- 核心调试日志卡片（复制、清空、折叠全部移到标题栏，最醒目，绝不遮挡） ---
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
