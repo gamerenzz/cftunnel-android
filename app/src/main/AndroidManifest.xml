@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"> <!-- 引入 tools 命名空间 -->
 
     <!-- 基础网络权限 -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -11,21 +12,25 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
+    <!-- 关键修复：申请安卓 11+ 最高级别文件管理特权（所有文件访问权限），攻克分区存储沙盒阻断 -->
+    <uses-permission 
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE" 
+        tools:ignore="ScopedStorage" />
+
     <!-- 前台服务权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
-    <!-- 适配点 A：重新挂载全新自适应矢量图标 -->
     <application
         android:allowBackup="true"
         android:extractNativeLibs="true"
+        android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         
-        <!-- 适配点 B：显式在 Activity 节点声明 android:label 以保障在荣耀等特定系统桌面上能够完美渲染出 cftunnel 的名称 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
