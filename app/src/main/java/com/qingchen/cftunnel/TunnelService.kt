@@ -43,14 +43,12 @@ class TunnelService : Service() {
         val port = intent?.getStringExtra("port") ?: "8080"
         val token = intent?.getStringExtra("token") ?: ""
         
-        // 新增参数：是否启用内嵌文件服务器
         val useFileServer = intent?.getBooleanExtra("use_file_server", false) ?: false
         val sharePath = intent?.getStringExtra("share_path") ?: ""
 
         stopTunnelProcess()
         TunnelManager.startTunnel()
 
-        // 1. 如果是临时免域名模式且开启了文件共享，优先拉起内嵌 HTTP 服务器
         if (mode == 0 && useFileServer && sharePath.isNotEmpty()) {
             val success = FileServer.start(port.toInt(), sharePath)
             if (!success) {
@@ -91,7 +89,11 @@ class TunnelService : Service() {
                 LogManager.addLog("Service", "构建执行进程指令: ${command.joinToString(" ")}")
 
                 val pb = ProcessBuilder(command)
+                // 关键点 1：重定向环境变量，防止 Go 写入家目录失败导致闪退
                 pb.environment()["HOME"] = filesDir.absolutePath
+                // 关键点 2（新增）：强行锁死运行期 Go 只准使用安卓原生 CGO DNS 解析，彻底杜绝其退回 [::1]:53 导致闪退
+                pb.environment()["GODEBUG"] = "netdns=cgo"
+                
                 pb.redirectErrorStream(true)
 
                 LogManager.addLog("Service", "正在拉起 ProcessBuilder 执行底层二进制进程...")
@@ -160,7 +162,7 @@ class TunnelService : Service() {
     override fun onDestroy() {
         LogManager.addLog("Service", "onDestroy()：后台保活服务生命周期结束，正在执行资源回收...")
         stopTunnelProcess()
-        FileServer.stop() // 同时安全停止内嵌文件服务器
+        FileServer.stop()
         TunnelManager.stopTunnel()
         super.onDestroy()
     }
