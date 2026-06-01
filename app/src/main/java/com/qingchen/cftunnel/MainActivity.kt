@@ -4,8 +4,11 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -41,7 +44,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // 关键修复点一：应用启动时，动态向系统申请外部存储读取权限（解决 Android 10+ 无法读取子文件夹的 Bug）
+        // 启动时强制执行最高文件管理特权检测与系统引导
         checkAndRequestPermissions()
 
         setContent {
@@ -57,22 +60,34 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkAndRequestPermissions() {
-        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { // Android 13+
-            arrayOf(
-                Manifest.permission.READ_MEDIA_IMAGES,
-                Manifest.permission.READ_MEDIA_VIDEO,
-                Manifest.permission.READ_MEDIA_AUDIO
-            )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) { // Android 11+
+            // 检测是否已经获得了所有文件访问特权
+            if (!Environment.isExternalStorageManager()) {
+                try {
+                    LogManager.addLog("System", "检测到未获得 [所有文件访问权限]，正在引导跳转至系统设置页...")
+                    Toast.makeText(this, "请授予 cftunnel [所有文件访问权限] 以读取您指定的共享文件夹", Toast.LENGTH_LONG).show()
+                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                        addCategory("android.intent.category.DEFAULT")
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    // 备用方案：如果部分定制系统无法直接精确跳转到本应用设置页，则跳转至全局管理页
+                    val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    startActivity(intent)
+                }
+            } else {
+                LogManager.addLog("System", "已确认拥有最高 [所有文件访问权限] 特权")
+            }
         } else {
-            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-        }
-
-        val neededPermissions = permissions.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-
-        if (neededPermissions.isNotEmpty()) {
-            ActivityCompat.requestPermissions(this, neededPermissions.toTypedArray(), 100)
+            // Android 11 以下系统的常规动态权限申请
+            val permissions = arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+            val neededPermissions = permissions.filter {
+                ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+            }
+            if (neededPermissions.isNotEmpty()) {
+                ActivityCompat.requestPermissions(this, neededPermissions.toTypedArray(), 100)
+            }
         }
     }
 }
@@ -97,8 +112,6 @@ fun TunnelDashboard() {
     val logs by LogManager.logs.collectAsState()
     var showLogs by remember { mutableStateOf(true) } 
     val lazyListState = rememberLazyListState()
-    
-    // 关键修复点二：为主界面加入 ScrollState。不管日志如何展开，整个界面都支持顺畅滚动，绝不遮挡底部
     val globalScrollState = rememberScrollState()
 
     LaunchedEffect(portText) { sharedPrefs.edit().putString("local_port", portText).apply() }
@@ -117,7 +130,7 @@ fun TunnelDashboard() {
             .fillMaxSize()
             .padding(16.dp)
             .statusBarsPadding()
-            .verticalScroll(globalScrollState) // 激活全局滑动
+            .verticalScroll(globalScrollState)
     ) {
         Text(
             text = "cftunnel 控制台",
