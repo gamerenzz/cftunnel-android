@@ -8,10 +8,13 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -39,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -87,6 +91,28 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// 安卓原生文档树存储路径转换器：零依赖将 content:// 树状 URI 解析为手机绝对物理路径 (/storage/emulated/0/...)
+fun getPathFromUri(context: Context, uri: Uri): String? {
+    return try {
+        val rawId = DocumentsContract.getTreeDocumentId(uri)
+        val parts = rawId.split(":")
+        if (parts.size >= 2) {
+            val type = parts[0]
+            val relativePath = parts[1]
+            if ("primary".equals(type, ignoreCase = true)) {
+                "/storage/emulated/0/$relativePath"
+            } else {
+                "/storage/$type/$relativePath" // 兼容外置 SD 内存卡
+            }
+        } else {
+            null
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
+}
+
 @Composable
 fun TunnelDashboard() {
     val context = LocalContext.current
@@ -98,20 +124,20 @@ fun TunnelDashboard() {
     var tokenText by remember { mutableStateOf(sharedPrefs.getString("tunnel_token", "") ?: "") }
 
     var useFileServer by remember { mutableStateOf(sharedPrefs.getBoolean("use_file_server", true)) }
-    var sharePath by remember { mutableStateOf(sharedPrefs.getString("share_path", "/storage/emulated/0/Download") ?: "/storage/emulated/0/Download") }
     
-    // 新增：是否允许公网上传文件的开关配置状态
+    // 默认依然是 Download 目录
+    var sharePath by remember { mutableStateOf(sharedPrefs.getString("share_path", "/storage/emulated/0/Download") ?: "/storage/emulated/0/Download") }
     var allowUpload by remember { mutableStateOf(sharedPrefs.getBoolean("allow_upload", false)) }
 
     val isRunning by TunnelManager.isRunning.collectAsState()
     val generatedUrl by TunnelManager.tunnelUrl.collectAsState()
     val statusText by TunnelManager.statusText.collectAsState()
-    
     val logs by LogManager.logs.collectAsState()
     var showLogs by remember { mutableStateOf(true) } 
     val lazyListState = rememberLazyListState()
     val globalScrollState = rememberScrollState()
 
+    // 自动保存输入
     LaunchedEffect(portText) { sharedPrefs.edit().putString("local_port", portText).apply() }
     LaunchedEffect(tokenText) { sharedPrefs.edit().putString("tunnel_token", tokenText).apply() }
     LaunchedEffect(useFileServer) { sharedPrefs.edit().putBoolean("use_file_server", useFileServer).apply() }
@@ -121,6 +147,33 @@ fun TunnelDashboard() {
     LaunchedEffect(logs.size) {
         if (logs.isNotEmpty()) {
             lazyListState.animateScrollToItem(logs.size - 1)
+        }
+    }
+
+    // 安卓系统原生文件夹选择器回调监听
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            val resolvedPath = getPathFromUri(context, uri)
+            if (resolvedPath != null) {
+                // 如果当前路径是默认的 Download 或者为空，直接替换。否则以分号 ";" 追加进行多目录挂载
+                if (sharePath == "/storage/emulated/0/Download" || sharePath.isBlank()) {
+                    sharePath = resolvedPath
+                    LogManager.addLog("UI", "成功选择自定义共享目录: $resolvedPath")
+                } else {
+                    val currentList = sharePath.split(";").map { it.trim() }.toMutableList()
+                    if (!currentList.contains(resolvedPath)) {
+                        currentList.add(resolvedPath)
+                        sharePath = currentList.joinToString(";")
+                        LogManager.addLog("UI", "成功追加挂载共享目录: $resolvedPath")
+                    } else {
+                        Toast.makeText(context, "该目录已在共享列表中", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } else {
+                Toast.makeText(context, "解析物理路径失败，请选择内部存储中的目录", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -224,7 +277,6 @@ fun TunnelDashboard() {
                     if (useFileServer) {
                         Spacer(modifier = Modifier.height(10.dp))
                         
-                        // --- 新增：允许公网上传文件的 Switch 开关 ---
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -253,7 +305,7 @@ fun TunnelDashboard() {
                         Spacer(modifier = Modifier.height(12.dp))
 
                         Text(
-                            text = "共享文件夹路径",
+                            text = "共享文件夹路径 (多个路径以分号隔开)",
                             color = Color(0xFFE4E4EF),
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -269,8 +321,7 @@ fun TunnelDashboard() {
                                 focusedTextColor = Color.White,
                                 unfocusedTextColor = Color.White
                             ),
-                            placeholder = { Text("请指定共享路径，例如 /storage/emulated/0", color = Color(0xFF8888A0)) },
-                            singleLine = true,
+                            placeholder = { Text("多个路径，如: /path/A;/path/B", color = Color(0xFF8888A0)) },
                             enabled = !isRunning
                         )
 
@@ -291,17 +342,24 @@ fun TunnelDashboard() {
                                 shape = btnShape,
                                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                             ) {
-                                Text("填入下载目录", fontSize = 11.sp, color = Color.White)
+                                Text("默认下载目录", fontSize = 11.sp, color = Color.White)
                             }
+                            
+                            // 适配点：替换为了“自定义目录”按钮，点击拉起安卓系统原生文件夹选择器
                             Button(
-                                onClick = { if (!isRunning) sharePath = "/storage/emulated/0/Documents" },
+                                onClick = { 
+                                    if (!isRunning) {
+                                        folderPickerLauncher.launch(null)
+                                    }
+                                },
                                 modifier = btnModifier,
                                 colors = btnColors,
                                 shape = btnShape,
                                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                             ) {
-                                Text("填入文档目录", fontSize = 11.sp, color = Color.White)
+                                Text("自定义目录 ➕", fontSize = 11.sp, color = Color.White)
                             }
+                            
                             Button(
                                 onClick = { if (!isRunning) sharePath = "/storage/emulated/0" },
                                 modifier = btnModifier,
@@ -309,7 +367,7 @@ fun TunnelDashboard() {
                                 shape = btnShape,
                                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                             ) {
-                                Text("填入整机存储", fontSize = 11.sp, color = Color.White)
+                                Text("整机存储", fontSize = 11.sp, color = Color.White)
                             }
                         }
                     }
@@ -377,8 +435,6 @@ fun TunnelDashboard() {
                         serviceIntent.putExtra("token", tokenText)
                         serviceIntent.putExtra("use_file_server", useFileServer && selectedTab == 0)
                         serviceIntent.putExtra("share_path", sharePath)
-                        
-                        // 适配点：将“是否允许公网上传”的状态作为 Extra 传递给 TunnelService
                         serviceIntent.putExtra("allow_upload", allowUpload && selectedTab == 0)
 
                         LogManager.addLog("UI", "用户点击了[启动隧道]按钮，端口: $portText，共享上传: $allowUpload")
