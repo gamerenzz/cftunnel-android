@@ -5,11 +5,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     
-    <!-- 前台服务基础权限（Android 9+ 必须） -->
+    <!-- 前台服务基础权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     
-    <!-- 对应 Android 14+ 前台服务特殊用途权限，保障在 Android 14 及以上系统上服务启动不发生闪退 -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- 使用更通用的 dataSync (数据同步) 权限，规避荣耀等系统对特殊用途 specialUse 的静默拦截 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:allowBackup="true"
@@ -17,7 +17,6 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         
-        <!-- 主程序 Activity 入口 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -28,12 +27,12 @@
             </intent-filter>
         </activity>
 
-        <!-- 注册前台穿透保活服务，并指定特殊用途运行类型 -->
+        <!-- 注册为 dataSync 类型 -->
         <service
             android:name=".TunnelService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="specialUse" />
+            android:foregroundServiceType="dataSync" />
             
     </application>
 </manifest>
