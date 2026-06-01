@@ -25,12 +25,12 @@ class TunnelService : Service() {
         createNotificationChannel()
         val notification = buildNotification("准备启动穿透内核...")
         
-        // 适配点：针对 Android 14+ 系统的特殊启动约束，必须传入对应 Service 声明类型参数
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { // API 34+
+        // 适配点：对应 manifest 声明的 dataSync 类型启动
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 notificationId,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             )
         } else {
             startForeground(notificationId, notification)
@@ -106,7 +106,7 @@ class TunnelService : Service() {
                 val exitCode = proc.waitFor()
                 if (exitCode != 0) {
                     val errorSummary = lastLogs.joinToString("\n")
-                    TunnelManager.updateStatus("内核退出 ($exitCode)。控制台日志:\n$errorSummary")
+                    TunnelManager.updateStatus("内核退出 ($exitCode)。最新日志:\n$errorSummary")
                 }
 
             } catch (e: Exception) {
