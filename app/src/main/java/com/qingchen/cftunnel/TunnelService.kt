@@ -45,9 +45,11 @@ class TunnelService : Service() {
         
         val useFileServer = intent?.getBooleanExtra("use_file_server", false) ?: false
         val sharePath = intent?.getStringExtra("share_path") ?: ""
-        
-        // 适配点：接收界面传来的“是否允许公网上传文件”标识
         val allowUpload = intent?.getBooleanExtra("allow_upload", false) ?: false
+        
+        // 适配点：接收界面传来的安全密码参数
+        val useAuth = intent?.getBooleanExtra("use_auth", false) ?: false
+        val authPassword = intent?.getStringExtra("auth_password") ?: ""
 
         stopTunnelProcess()
         TunnelManager.startTunnel()
@@ -67,8 +69,8 @@ class TunnelService : Service() {
         }
 
         if (mode == 0 && useFileServer && sharePath.isNotEmpty()) {
-            // 适配点：启动时，将 allowUpload 传递给内嵌文件服务器
-            val success = FileServer.start(port.toInt(), sharePath, allowUpload)
+            // 适配点：启动时，将 useAuth 与 authPassword 传递给底层服务器
+            val success = FileServer.start(port.toInt(), sharePath, allowUpload, useAuth, authPassword)
             if (!success) {
                 LogManager.addLog("Service_Error", "内嵌文件服务器启动失败，请检查端口是否被占用")
                 TunnelManager.updateStatus("错误: 文件服务器启动失败")
