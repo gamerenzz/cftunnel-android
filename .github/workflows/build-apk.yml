@@ -18,14 +18,19 @@ jobs:
       with:
         go-version: '1.22'
 
-    # 2. 核心补丁：劫持 Go 源码中硬编码的 resolv.conf 路径，指向 App 的私有可写目录
+    # 2. 核心补丁：双重劫持 Go 网络库，绕过安卓 10+ 的 DNS 封锁
     - name: Patch Go DNS Resolver for Android
       run: |
         GOROOT=$(go env GOROOT)
         echo "Go Root found at: $GOROOT"
-        # 遍历替换 net 包中的只读路径为 cftunnel 的私有可写路径
+        
+        # 补丁 A：将 net 包中所有硬编码的 /etc/resolv.conf 替换为 cftunnel App 的私有绝对物理路径
         find $GOROOT/src/net/ -type f -exec sed -i 's|"/etc/resolv.conf"|"/data/data/com.qingchen.cftunnel/files/resolv.conf"|g' {} +
-        echo "Go DNS resolver patch applied successfully!"
+        
+        # 补丁 B：强行将 net 包中对 android 的特殊 DNS 规避检测置为 false，迫使 Go 像对待标准 Linux 一样读取配置文件
+        find $GOROOT/src/net/ -type f -exec sed -i 's|runtime.GOOS == "android"|false|g' {} +
+        
+        echo "Go DNS resolver double patches applied successfully!"
 
     # 3. 编译并生成适用于 Android 的 libcloudflared.so
     - name: Compile cloudflared for Android ARM64 with CGO
