@@ -49,9 +49,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // 1. 动态读取权限检测
         checkAndRequestPermissions()
-        // 2. 核心适配：动态申请系统级“忽略电池优化”白名单，保障息屏进程不被系统冻结强杀
         requestIgnoreBatteryOptimizations()
 
         setContent {
@@ -154,6 +152,9 @@ fun TunnelDashboard() {
     var useAuth by remember { mutableStateOf(sharedPrefs.getBoolean("use_auth", false)) }
     var authPassword by remember { mutableStateOf(sharedPrefs.getString("auth_password", "") ?: "") }
 
+    // 新增：传输协议配置状态（0 = QUIC 默认，1 = HTTP/2 备用）
+    var protocolMode by remember { mutableStateOf(sharedPrefs.getInt("protocol_mode", 0)) }
+
     val isRunning by TunnelManager.isRunning.collectAsState()
     val generatedUrl by TunnelManager.tunnelUrl.collectAsState()
     val statusText by TunnelManager.statusText.collectAsState()
@@ -170,6 +171,9 @@ fun TunnelDashboard() {
     LaunchedEffect(allowUpload) { sharedPrefs.edit().putBoolean("allow_upload", allowUpload).apply() }
     LaunchedEffect(useAuth) { sharedPrefs.edit().putBoolean("use_auth", useAuth).apply() }
     LaunchedEffect(authPassword) { sharedPrefs.edit().putString("auth_password", authPassword).apply() }
+    
+    // 自适应存储协议选项到 SharedPrefs 
+    LaunchedEffect(protocolMode) { sharedPrefs.edit().putInt("protocol_mode", protocolMode).apply() }
 
     LaunchedEffect(logs.size) {
         if (logs.isNotEmpty()) {
@@ -491,6 +495,62 @@ fun TunnelDashboard() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        // --- 新增：高级设置卡片（用于切换 QUIC 与 HTTP/2 传输协议，预防 4G/5G 数据基站 UDP 限速丢包） ---
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "穿透传输协议",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "4G/5G数据掉线时，请切换至 HTTP/2",
+                        color = Color(0xFF8888A0),
+                        fontSize = 11.sp
+                    )
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val quicColor = if (protocolMode == 0) Color(0xFF3B82F6) else Color(0xFF2A2A3A)
+                    val h2Color = if (protocolMode == 1) Color(0xFF3B82F6) else Color(0xFF2A2A3A)
+
+                    Button(
+                        onClick = { if (!isRunning) protocolMode = 0 },
+                        colors = ButtonDefaults.buttonColors(containerColor = quicColor),
+                        shape = RoundedCornerShape(6.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                    ) {
+                        Text("QUIC", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = { if (!isRunning) protocolMode = 1 },
+                        colors = ButtonDefaults.buttonColors(containerColor = h2Color),
+                        shape = RoundedCornerShape(6.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                    ) {
+                        Text("HTTP/2", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -512,8 +572,11 @@ fun TunnelDashboard() {
                         serviceIntent.putExtra("allow_upload", allowUpload && selectedTab == 0)
                         serviceIntent.putExtra("use_auth", useAuth && selectedTab == 0)
                         serviceIntent.putExtra("auth_password", authPassword)
+                        
+                        // 适配点：向后台服务传入当前选择的传输协议模式参数 (0 = quic, 1 = http2)
+                        serviceIntent.putExtra("protocol_mode", protocolMode)
 
-                        LogManager.addLog("UI", "用户点击了[启动隧道]按钮，端口: $portText，共享上传: $allowUpload，开启密码保护: $useAuth")
+                        LogManager.addLog("UI", "用户点击了[启动隧道]按钮，端口: $portText，共享上传: $allowUpload，开启密码: $useAuth，传输协议: ${if(protocolMode==0)"QUIC" else "HTTP/2"}")
 
                         try {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -594,7 +657,6 @@ fun TunnelDashboard() {
                 }
 
                 if (isRunning) {
-                    // --- 核心优化回显点：当启动时，动态显示共享的文件目录列表和安全密码，彻底解决遗忘痛点 ---
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "📁 已挂载共享路径:\n${sharePath.replace(";", "\n")}",
@@ -612,6 +674,14 @@ fun TunnelDashboard() {
                             fontWeight = FontWeight.Bold
                         )
                     }
+                    // 新增：运行状态卡片中，实时向用户提示当前正在使用的传输层协议
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "📡 隧道传输协议:  ${if(protocolMode == 0) "QUIC (高吞吐/UDP)" else "HTTP/2 (极稳/TCP)"}",
+                        color = Color(0xFF22C55E),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
 
                 if (isRunning && selectedTab == 0 && generatedUrl.isNotEmpty()) {
