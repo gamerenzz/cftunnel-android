@@ -1,10 +1,13 @@
 package com.qingchen.cftunnel
 
 import android.app.*
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import java.io.BufferedReader
 import java.io.File
@@ -17,6 +20,10 @@ class TunnelService : Service() {
     private var process: Process? = null
     private val notificationId = 1024
     private val channelId = "cftunnel_service_channel"
+
+    // 声明硬件锁：CPU 唤醒锁与高功耗 Wi-Fi 网络锁
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -36,6 +43,21 @@ class TunnelService : Service() {
             startForeground(notificationId, notification)
         }
         LogManager.addLog("Service", "startForeground()：前台保活服务已挂载到状态栏")
+
+        // 强力硬核保活：申请系统 CPU 锁和最高性能级别 Wi-Fi 锁，防止息屏后进程被冻结或网络休眠断线
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "cftunnel::CpuWakeLock")
+            wakeLock?.acquire()
+            LogManager.addLog("Service", "🔐 成功申请 CPU 唤醒锁 (WakeLock)，防止息屏 CPU 深休眠")
+
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "cftunnel::WifiLock")
+            wifiLock?.acquire()
+            LogManager.addLog("Service", "🔐 成功申请 Wi-Fi 高性能锁 (WifiLock)，防止息屏无线网卡停摆")
+        } catch (e: Exception) {
+            LogManager.addLog("Service_Warning", "申请硬件锁发生异常: ${e.message}")
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -46,8 +68,6 @@ class TunnelService : Service() {
         val useFileServer = intent?.getBooleanExtra("use_file_server", false) ?: false
         val sharePath = intent?.getStringExtra("share_path") ?: ""
         val allowUpload = intent?.getBooleanExtra("allow_upload", false) ?: false
-        
-        // 适配点：接收界面传来的安全密码参数
         val useAuth = intent?.getBooleanExtra("use_auth", false) ?: false
         val authPassword = intent?.getStringExtra("auth_password") ?: ""
 
@@ -69,7 +89,6 @@ class TunnelService : Service() {
         }
 
         if (mode == 0 && useFileServer && sharePath.isNotEmpty()) {
-            // 适配点：启动时，将 useAuth 与 authPassword 传递给底层服务器
             val success = FileServer.start(port.toInt(), sharePath, allowUpload, useAuth, authPassword)
             if (!success) {
                 LogManager.addLog("Service_Error", "内嵌文件服务器启动失败，请检查端口是否被占用")
@@ -181,6 +200,21 @@ class TunnelService : Service() {
         LogManager.addLog("Service", "onDestroy()：后台保活服务生命周期结束，正在执行资源回收...")
         stopTunnelProcess()
         FileServer.stop()
+        
+        // 安全释放物理锁
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+                LogManager.addLog("Service", "🔓 已安全释放 CPU 唤醒锁 (WakeLock)")
+            }
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
+                LogManager.addLog("Service", "🔓 已安全释放 Wi-Fi 高性能锁 (WifiLock)")
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
         TunnelManager.stopTunnel()
         super.onDestroy()
     }
