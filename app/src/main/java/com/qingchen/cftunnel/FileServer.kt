@@ -162,7 +162,7 @@ object FileServer {
                 val destFile = File(finalDir, filename)
                 LogManager.addLog("FileServer", "公网开始上传文件: $filename -> 目标路径: ${destFile.absolutePath} (大小: ${contentLength} 字节)")
 
-                // 流式安全接收与落盘（不占系统运存，支持 GB 级大文件传输）
+                // 流式安全接收与落盘
                 val fos = FileOutputStream(destFile)
                 val buffer = ByteArray(8192)
                 var totalBytesRead = 0L
@@ -229,7 +229,6 @@ object FileServer {
         sb.append("a { color: #60a5fa; text-decoration: none; font-size: 15px; display: block; flex: 1; word-break: break-all; }")
         sb.append("a:hover { color: #3b82f6; }")
         sb.append(".back-btn { display: inline-block; padding: 6px 12px; background: #2a2a3a; border-radius: 6px; font-size: 13px; margin-bottom: 15px; color: #e4e4ef; }")
-        // 上传组件样式
         sb.append(".upload-card { background: #161622; border: 1.5px dashed #3b82f6; border-radius: 8px; padding: 16px; text-align: center; margin-bottom: 20px; }")
         sb.append(".upload-btn { background: #3b82f6; color: white; border: none; padding: 8px 18px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; margin-top: 10px; }")
         sb.append(".upload-btn:hover { background: #2563eb; }")
@@ -255,7 +254,6 @@ object FileServer {
             sb.append("<div id='status' style='margin-top: 10px; font-size: 12px; color: #8888a0;'></div>")
             sb.append("</div>")
 
-            // 纯原生 JavaScript 上传引擎：基于 XMLHttpRequest 的二进制流式上传
             sb.append("<script>")
             sb.append("function uploadFile() {")
             sb.append("  var fileInput = document.getElementById('fileInput');")
@@ -264,9 +262,9 @@ object FileServer {
             sb.append("  var status = document.getElementById('status');")
             sb.append("  status.innerText = '正在上传: ' + file.name + ' (0%) ...';")
             sb.append("  var xhr = new XMLHttpRequest();")
-            sb.append("  var targetUrl = '/upload?filename=' + encodeURIComponent(file.name) + '&dir=' + encodeURIComponent(window.location.pathname);")
+            // 关键点：将 encodeURIComponent(window.location.pathname) 恢复为原生 window.location.pathname，防止双重 URL 编码导致中文文件夹名字乱码
+            sb.append("  var targetUrl = '/upload?filename=' + encodeURIComponent(file.name) + '&dir=' + window.location.pathname;")
             sb.append("  xhr.open('POST', targetUrl, true);")
-            // 实时更新上传百分比
             sb.append("  xhr.upload.onprogress = function(e) {")
             sb.append("    if (e.lengthComputable) {")
             sb.append("      var percent = Math.round((e.loaded / e.total) * 100);")
