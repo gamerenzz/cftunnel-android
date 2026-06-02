@@ -1,0 +1,83 @@
+name: Build Windows App
+
+on:
+
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest # 切换为原生 Windows 构建机，支持输出 .exe / .zip 绿色套件
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # 1. 配置 Go 环境
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    # 2. 拉取官方 cloudflared 并强行注入代码级 DNS 劫持补丁
+    - name: Compile cloudflared.exe with DNS Patch
+      shell: bash
+      run: |
+        mkdir -p app/src/main/resources
+        git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
+        
+        # 写入 dns_patch.go，强行接管 Go 底层域名解析到 223.5.5.5:53
+        cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
+        package main
+
+        import (
+            "context"
+            "net"
+        )
+
+        func init() {
+            net.DefaultResolver = &net.Resolver{
+                PreferGo: true,
+                Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+                    var d net.Dialer
+                    return d.DialContext(ctx, "udp", "223.5.5.5:53")
+                },
+            }
+        }
+        EOF
+
+        cd cloudflared-src
+        
+        # 纯 Go 编译 Windows 64位可执行文件
+        export CGO_ENABLED=0
+        export GOOS=windows
+        export GOARCH=amd64
+        
+        echo "Starting Go compilation for Windows AMD64..."
+        go build -ldflags="-s -w" -o ../app/src/main/resources/libcloudflared.exe github.com/cloudflare/cloudflared/cmd/cloudflared
+        
+        cd ..
+        echo "Kernel compiled successfully!"
+        ls -lh app/src/main/resources/libcloudflared.exe
+
+    # 3. 配置 Java 17 运行环境
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    # 4. 运行 Gradle 编译打包绿色版 Windows 压缩包
+    - name: Build Windows App using Gradle
+      shell: bash
+      run: |
+        gradle wrapper --gradle-version 8.5
+        chmod +x gradlew
+        # 执行 JetBrains Compose Desktop 的绿色打包命令
+        ./gradlew :app:packageZipDistributionForCurrentOS
+
+    # 5. 将打包好的绿色版 Windows 软件套件发布至 Artifacts 供下载
+    - name: Upload Output Windows App
+      uses: actions/upload-artifact@v4
+      with:
+        name: cftunnel-windows-app
+        path: app/build/compose/binaries/main/zip/
