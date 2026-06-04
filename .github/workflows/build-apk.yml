@@ -17,12 +17,11 @@ jobs:
       with:
         go-version: '1.24'
 
-    # 1. 编译底层的 LD_PRELOAD 端口劫持神器 libhijack.so (修复了 IPv6 漏网之鱼 Bug)
+    # 1. 编译底层的 LD_PRELOAD 端口劫持神器 libhijack.so
     - name: Compile LD_PRELOAD DNS Hijacker
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
         
-        # 极硬核 C 语言底层拦截器
         cat << 'EOF' > hijack.c
         #define _GNU_SOURCE
         #include <dlfcn.h>
@@ -37,7 +36,6 @@ jobs:
             orig_connect_func_type orig_connect;
             orig_connect = (orig_connect_func_type)dlsym(RTLD_NEXT, "connect");
 
-            // 无论是 IPv4 还是 IPv6，只要目标端口是 53，我们统统强行覆写为 IPv4 结构体指向 127.0.0.1:53533
             if (addr->sa_family == AF_INET) {
                 struct sockaddr_in *sin = (struct sockaddr_in *)addr;
                 if (ntohs(sin->sin_port) == 53) {
@@ -47,7 +45,6 @@ jobs:
             } else if (addr->sa_family == AF_INET6) {
                 struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
                 if (ntohs(sin6->sin6_port) == 53) {
-                    // 核心修复点：遇到 IPv6 解析时，将其整个地址结构强行降级、篡改为 IPv4，指向拦截器
                     struct sockaddr_in faked_ipv4;
                     memset(&faked_ipv4, 0, sizeof(faked_ipv4));
                     faked_ipv4.sin_family = AF_INET;
@@ -57,7 +54,6 @@ jobs:
                     return orig_connect(sockfd, (struct sockaddr *)&faked_ipv4, sizeof(faked_ipv4));
                 }
             }
-            
             return orig_connect(sockfd, addr, addrlen);
         }
         EOF
@@ -90,7 +86,6 @@ jobs:
         }
 
         func startLocalDNSServer() {
-            // 监听 IPv4 的 53533 端口
             addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:53533")
             conn, err := net.ListenUDP("udp", addr)
             if err != nil { return }
@@ -105,17 +100,14 @@ jobs:
                 domain := parseDNSQueryDomain(query)
                 preferredIP := os.Getenv("PREFERRED_IP")
 
-                // 精确制导拦截
                 if preferredIP != "" && strings.Contains(domain, "argotunnel.com") {
                     qTypeOffset := n - 4
                     if qTypeOffset > 12 {
-                        // 无差别拦截所有类型请求（A/AAAA/SRV），全部用强硬 A 记录把内核堵死在优选 IP 上！
                         response := fakedDNSResponse(query, preferredIP)
                         conn.WriteToUDP(response, clientAddr)
                         continue
                     }
                 }
-
                 go forwardDNS(conn, clientAddr, query)
             }
         }
@@ -173,13 +165,21 @@ jobs:
         
         cd cloudflared-src
         
-        # 启用 CGO 链接，确保生成的 cloudflared 内核会调用系统的 libc 从而掉进我们的 LD_PRELOAD 陷阱
-        export CGO_ENABLED=1
+        # 核心修正：强行获取安卓 NDK 编译器的绝对路径，并将其导出至全局环境变量 CC 中
+        # 这能确保 Go 在编译底层 ARM 汇编与 C 库时，使用正确的安卓编译器，从而彻底解决所有编译报错！
+        NDK_PATH=$ANDROID_NDK_LATEST_HOME
+        CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android26-clang" | head -n 1)
+        if [ -z "$CLANG_PATH" ]; then
+          CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android*-clang" | head -n 1)
+        fi
+        
         export CC=$CLANG_PATH
+        export CXX="${CLANG_PATH}++"
+        export CGO_ENABLED=1
         export GOOS=android
         export GOARCH=arm64
         
-        echo "Starting CGO compilation for Android ARM64..."
+        echo "Starting CGO compilation for Android ARM64 with CC=$CC..."
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
