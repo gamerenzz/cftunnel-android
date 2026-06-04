@@ -135,7 +135,6 @@ class TunnelService : Service() {
                 pb.environment()["HOME"] = filesDir.absolutePath
                 pb.environment()["GODEBUG"] = "netdns=go"
                 
-                // 核心修复点：不再写入敏感多阻断的 hosts 文件，直接通过进程环境变量将优选 IP 安全注入内置极简拦截 DNS 服务中！
                 if (usePreferredIp && preferredIp.isNotEmpty()) {
                     pb.environment()["PREFERRED_IP"] = preferredIp
                     LogManager.addLog("Service", "🚀 [代码级 DNS 拦截已载入]：已通过环境变量将广域域名强指优选 IP: $preferredIp")
@@ -157,10 +156,12 @@ class TunnelService : Service() {
                     val logLine = line ?: break
                     android.util.Log.d("cftunnel_kernel", logLine)
 
+                    // 核心修正点：修复了上一版写错的 break 逻辑。将其修改为标准队列先进先出，保障 While 循环长效运行不中断！
                     if (lastLogs.size >= 5) {
-                        break
+                        lastLogs.removeAt(0)
                     }
                     lastLogs.add(logLine)
+                    LogManager.addLog("Kernel", logLine)
 
                     if (mode == 0 && logLine.contains("trycloudflare.com")) {
                         val regex = Regex("https://[a-zA-Z0-9-]+\\.trycloudflare\\.com")
