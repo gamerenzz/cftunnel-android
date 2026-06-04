@@ -36,13 +36,24 @@ jobs:
         grep -rn "127.0.0.1:53533" $GOROOT/src/net/
         echo "=============================="
 
-    # 3. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，并强行关闭 GOCACHE 缓存机制)
+    # 3. 强行且仅对 net 标准网络包进行安全重构 (运行在当前普通用户 runner 状态下，确保编译出的缓存能被接下来的构建完美加载)
+    - name: Force Rebuild Patched Go Net Package
+      run: |
+        export CGO_ENABLED=0
+        export GOOS=android
+        export GOARCH=arm64
+        
+        # 作为普通用户直接编译，由于我们删除了 pkg，这里会从 net 补丁源码中物理重构出 net.a 缓存
+        go install -a net
+        echo "Patched standard net package compiled and cached successfully!"
+
+    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，强锁本地编译器 + 重定向空缓存)
     - name: Compile cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 注入 Go 全局高阶 DNS 拦截服务器
+        # 再次注入高阶局部 DNS 劫持服务端
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
@@ -196,10 +207,14 @@ jobs:
         export GOOS=android
         export GOARCH=arm64
         
-        # 极度关键：强行关闭 Go 语言编译器的全局缓存（GOCACHE），迫使其直接从我们修改好的网络库物理源码中重头全新编译！
-        export GOCACHE=off
+        # 1. 核心适配一：强制锁定本地打过补丁的 go1.22 编译器，绝对禁止 go 编译器私自去外网下载干净的 toolchain 导致补丁失效！
+        export GOTOOLCHAIN=local
         
-        echo "Starting pure Go static compilation (GOCACHE=off) for Android ARM64..."
+        # 2. 核心适配二：强行创建一个全新、干净的临时目录作为缓存目录。这既满足了 Go 1.12+ 必须启用 GOCACHE 的硬性机制，又在物理上实现了 100% 全新源码重构编译（Cache Miss）
+        mkdir -p /tmp/go-clean-cache
+        export GOCACHE=/tmp/go-clean-cache
+        
+        echo "Starting pure Go static compilation with Clean-GOCACHE and Local-Toolchain..."
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
