@@ -18,29 +18,33 @@ jobs:
       with:
         go-version: '1.22'
 
-    # 2. 核心补丁：使用 sudo 超级特权，强行劫持 Go 网络库在安卓上无 DNS 时的默认回退地址 (127.0.0.1:53 / [::1]:53)，重定向到我们的拦截端口 53533
+    # 2. 核心特权劫持：夺取 GOROOT 目录所有权，统一普通用户缓存，强行完成底层 53 端口回退重定向
     - name: Patch Go DNS Resolver Fallbacks for Android
       run: |
         GOROOT=$(go env GOROOT)
         echo "Go Root found at: $GOROOT"
         
-        # 使用 sudo 强制获取最高权限，无视只读约束，强行对 *.go 源码完成硬编码的 53 端口重定向
-        sudo find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"127.0.0.1:53"|"127.0.0.1:53533"|g' {} +
-        sudo find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"[::1]:53"|"127.0.0.1:53533"|g' {} +
+        # 强行将系统 GOROOT 目录的所有权赋予当前普通用户 runner，彻底解决权限和缓存用户不匹配的硬伤
+        sudo chown -R runner:runner $GOROOT
+        
+        # 在普通用户权限下，无阻碍地劫持 Go 底层无 DNS 配置时的默认回退地址，指向我们的高阶拦截端口 53533
+        find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"127.0.0.1:53"|"127.0.0.1:53533"|g' {} +
+        find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"[::1]:53"|"127.0.0.1:53533"|g' {} +
         
         # 自动验证补丁是否注入成功
         echo "===== 自动验证补丁注入状态 ====="
         grep -rn "127.0.0.1:53533" $GOROOT/src/net/
         echo "=============================="
 
-    # 3. 使用 sudo -E 强制对 net 标准网络包进行安全重构
+    # 3. 强行且仅对 net 标准网络包进行安全重构 (运行在当前普通用户 runner 状态下，确保编译出的缓存能被接下来的构建完美加载)
     - name: Force Rebuild Patched Go Net Package
       run: |
         export CGO_ENABLED=0
         export GOOS=android
         export GOARCH=arm64
         
-        sudo -E go install -a net
+        # 作为普通用户直接编译，缓存自动写入 /home/runner/.cache/go-build 中
+        go install -a net
         echo "Patched standard net package compiled and cached successfully!"
 
     # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端)
@@ -49,7 +53,7 @@ jobs:
         mkdir -p app/src/main/jniLibs/arm64-v8a
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 注入 Go 全局高阶 DNS 拦截服务器
+        # 再次注入高阶局部 DNS 劫持服务端
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
@@ -199,8 +203,6 @@ jobs:
         EOF
         
         cd cloudflared-src
-        
-        # 启用 100% 极速静态纯 Go 编译，不碰 NDK，不再需要全局 -a，确保二进制内核绝对稳定、绝不闪退
         export CGO_ENABLED=0
         export GOOS=android
         export GOARCH=arm64
@@ -209,7 +211,6 @@ jobs:
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
-        echo "Pure Go static Compilation completed. File size details:"
         ls -lh app/src/main/jniLibs/arm64-v8a/libcloudflared.so
 
     # 5. 配置 Java 运行环境
