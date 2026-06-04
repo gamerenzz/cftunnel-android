@@ -46,13 +46,13 @@ jobs:
         go install -a net
         echo "Patched standard net package compiled and cached successfully!"
 
-    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，追加全量 OTel 强替规则)
+    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，自动整理 go.sum)
     - name: Compile cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 注入 Go 全局高阶 DNS 拦截服务器
+        # 注入 Go 全局高阶 DNS 拦截服务器 (已修正第 103 行 "udp" 字符串拼写笔误)
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
@@ -125,7 +125,8 @@ jobs:
             if err != nil {
                 return
             }
-            serverConn, err := net.DialUDP(udp, nil, serverAddr)
+            // 修正点：将原先误写为变量的 udp 修改为了标准的字符串 "udp"
+            serverConn, err := net.DialUDP("udp", nil, serverAddr)
             if err != nil {
                 return
             }
@@ -208,9 +209,7 @@ jobs:
         sed -i 's|^go 1\.[0-9]\+|go 1.24|g' cloudflared-src/go.mod
         sed -i '/^toolchain/d' cloudflared-src/go.mod
         
-        # 3. 终极天罗地网劫持（重磅升级）：在 go.mod 底部强行追加全量 replace 规则！
-        # 一次性、强制将 Go 官方全部 6 大核心子包和 OpenTelemetry (OTel) 核心包
-        # 全部降级重定向为兼容 Go 1.24 的最稳定版本。彻底断绝任何高版本子依赖包在公网拉取时的强行验证阻断！
+        # 3. 核心重定向：在 go.mod 底部强行追加 replace 规则！
         echo "replace golang.org/x/net => golang.org/x/net v0.33.0" >> cloudflared-src/go.mod
         echo "replace golang.org/x/term => golang.org/x/term v0.26.0" >> cloudflared-src/go.mod
         echo "replace golang.org/x/crypto => golang.org/x/crypto v0.31.0" >> cloudflared-src/go.mod
@@ -234,6 +233,10 @@ jobs:
         export GOTOOLCHAIN=local
         mkdir -p /tmp/go-clean-cache
         export GOCACHE=/tmp/go-clean-cache
+        
+        # 核心适配点：自动执行依赖指纹和 go.sum 补齐整理，一键攻克 Hash 缺失报错
+        echo "Tidying go modules..."
+        go mod tidy
         
         echo "Starting pure Go static compilation with Clean-GOCACHE and OTel Dependency-Replacement..."
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
