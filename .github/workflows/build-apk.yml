@@ -36,14 +36,13 @@ jobs:
         grep -rn "127.0.0.1:53533" $GOROOT/src/net/
         echo "=============================="
 
-    # 3. 强行且仅对 net 标准网络包进行安全重构 (运行在当前普通用户 runner 状态下，确保编译出的缓存能被接下来的构建完美加载)
+    # 3. 强行且仅对 net 标准网络包进行安全重构
     - name: Force Rebuild Patched Go Net Package
       run: |
         export CGO_ENABLED=0
         export GOOS=android
         export GOARCH=arm64
         
-        # 作为普通用户直接编译，缓存自动写入 /home/runner/.cache/go-build 中
         go install -a net
         echo "Patched standard net package compiled and cached successfully!"
 
@@ -53,7 +52,7 @@ jobs:
         mkdir -p app/src/main/jniLibs/arm64-v8a
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 再次注入高阶局部 DNS 劫持服务端
+        # 注入 Go 全局高阶 DNS 拦截服务器
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
@@ -101,10 +100,9 @@ jobs:
                 domain := parseDNSQueryDomain(query)
                 preferredIP := os.Getenv("PREFERRED_IP")
 
-                // 如果启用了优选 IP，且当前查询是 Cloudflare 穿透核心域名
-                if preferredIP != "" && (strings.Contains(domain, "trycloudflare.com") || 
-                    strings.Contains(domain, "argotunnel.com") || 
-                    strings.Contains(domain, "cloudflare.com")) {
+                // 核心重构：只拦截并加速 argotunnel.com（高带宽流量管道）到优选 IP
+                // 让 trycloudflare.com（仅用于初始注册，数据微小）走公共 DNS 默认解析，避开 1101 节点故障
+                if preferredIP != "" && strings.Contains(domain, "argotunnel.com") {
                     
                     qTypeOffset := n - 4
                     if qTypeOffset > 12 {
@@ -117,7 +115,7 @@ jobs:
                     }
                 }
 
-                // 常规请求，统一、直接转发给公网公共 DNS (114.114.114.114:53)，绕过安卓系统所有沙盒限制
+                // 常规请求，统一、直接转发给公网公共 DNS (114.114.114.114:53)
                 go forwardDNS(conn, clientAddr, query)
             }
         }
