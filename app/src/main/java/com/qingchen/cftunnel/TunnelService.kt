@@ -76,8 +76,8 @@ class TunnelService : Service() {
         stopTunnelProcess()
         TunnelManager.startTunnel()
 
-        // 1. 写入 DNS 配置文件 resolv.conf (供底层的 netgo 使用)
-        val resolvFile = File("/data/data/com.qingchen.cftunnel/files/resolv.conf")
+        // 1. 写入 DNS 配置文件 resolv.conf (使用真实物理路径 filesDir)
+        val resolvFile = File(filesDir, "resolv.conf")
         try {
             resolvFile.parentFile?.mkdirs()
             resolvFile.writeText(
@@ -85,13 +85,13 @@ class TunnelService : Service() {
                 "nameserver 8.8.8.8\n" +
                 "nameserver 1.1.1.1\n"
             )
-            LogManager.addLog("Service", "本地 DNS 配置文件 resolv.conf 已成功写入物理路径")
+            LogManager.addLog("Service", "本地 DNS 配置文件 resolv.conf 已成功写入物理路径: ${resolvFile.absolutePath}")
         } catch (e: Exception) {
             LogManager.addLog("Service_Error", "写入 resolv.conf 配置文件失败: ${e.message}")
         }
 
-        // 2. 写入 优选 IP hosts 映射文件 (强制底层的 netgo 优先读取 hosts 规则)
-        val hostsFile = File("/data/data/com.qingchen.cftunnel/files/hosts")
+        // 2. 写入 优选 IP hosts 映射文件 (使用真实物理路径 filesDir，彻底绕过软链接阻断)
+        val hostsFile = File(filesDir, "hosts")
         if (usePreferredIp && preferredIp.isNotEmpty()) {
             try {
                 hostsFile.parentFile?.mkdirs()
@@ -106,7 +106,6 @@ class TunnelService : Service() {
                 LogManager.addLog("Service_Error", "写入 hosts 优选规则失败: ${e.message}")
             }
         } else {
-            // 如果用户在界面关闭了优选 IP，写入默认的 hosts 规则进行重置，防止加载上一次的残留缓存
             try {
                 hostsFile.parentFile?.mkdirs()
                 hostsFile.writeText("127.0.0.1 localhost\n::1 localhost\n")
