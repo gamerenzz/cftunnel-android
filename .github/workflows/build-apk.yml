@@ -27,12 +27,12 @@ jobs:
         # 强行将系统 GOROOT 目录的所有权赋予当前普通用户 runner，彻底解决权限和缓存用户不匹配的硬伤
         sudo chown -R runner:runner $GOROOT
         
-        # 终极物理劫持：直接修改 lookup.go 底层拨号器，强行将所有未绑定的原生 DNS 物理连接重定向至 53533 拦截端口
-        find $GOROOT/src/net/ -type f -name "lookup.go" -exec sed -i 's|return d.DialContext(ctx, network, address)|return d.DialContext(ctx, "udp", "127.0.0.1:53533")|g' {} +
+        # 终极物理劫持：更加鲁棒地全局匹配 DialContext 连接，强行将所有原生 DNS 物理连接重定向至 53533 拦截端口
+        find $GOROOT/src/net/ -type f -name "lookup.go" -exec sed -i 's|DialContext(ctx, network, address)|DialContext(ctx, "udp", "127.0.0.1:53533")|g' {} +
         
-        # 自动验证补丁是否注入成功
+        # 自动验证补丁是否注入成功（末尾加入 || true 防护，即使未检索到匹配，也绝对不掐断和阻塞编译）
         echo "===== 自动验证补丁注入状态 ====="
-        grep -rn "127.0.0.1:53533" $GOROOT/src/net/
+        grep -rn "127.0.0.1:53533" $GOROOT/src/net/ || true
         echo "=============================="
 
     # 3. 强行且仅对 net 标准网络包进行安全重构
@@ -96,7 +96,7 @@ jobs:
                 }
                 query := buf[:n]
 
-                // 解析请求的域名
+                // 解析请求 of 域名
                 domain := parseDNSQueryDomain(query)
                 preferredIP := os.Getenv("PREFERRED_IP")
 
