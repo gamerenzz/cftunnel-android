@@ -18,7 +18,7 @@ jobs:
       with:
         go-version: '1.24'
 
-    # 2. 编译并生成适用于 Android 的 libcloudflared.so (注入全局高阶 DNS 拦截服务端)
+    # 2. 编译并生成适用于 Android 的 libcloudflared.so (注入精细化高阶 DNS 拦截服务端)
     - name: Compile cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
@@ -73,10 +73,9 @@ jobs:
                 domain := parseDNSQueryDomain(query)
                 preferredIP := os.Getenv("PREFERRED_IP")
 
-                // 核心重构：拦截核心流量域名到优选 IP
-                if preferredIP != "" && (strings.Contains(domain, "trycloudflare.com") || 
-                    strings.Contains(domain, "argotunnel.com") || 
-                    strings.Contains(domain, "cloudflare.com")) {
+                // 核心重构：仅拦截并强指 argotunnel.com（核心高带宽数据管道）到优选 IP
+                // 允许 trycloudflare.com（注册API）和 cloudflare.com 走公共 DNS 默认解析，完美避开 1101 故障
+                if preferredIP != "" && strings.Contains(domain, "argotunnel.com") {
                     
                     qTypeOffset := n - 4
                     if qTypeOffset > 12 {
