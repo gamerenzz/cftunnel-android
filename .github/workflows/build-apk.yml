@@ -46,13 +46,13 @@ jobs:
         go install -a net
         echo "Patched standard net package compiled and cached successfully!"
 
-    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，追加全量依赖强替规则)
+    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，全量一次性大劫持)
     - name: Compile cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 注入 Go 全局高阶 DNS 拦截服务器
+        # 注入 Go 全局高阶 DNS 拦截服务器 (已修正第 103 行 "udp" 字符串拼写笔误)
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
@@ -208,7 +208,8 @@ jobs:
         sed -i 's|^go 1\.[0-9]\+|go 1.24|g' cloudflared-src/go.mod
         sed -i '/^toolchain/d' cloudflared-src/go.mod
         
-        # 3. 终极天罗地网劫持（全量覆盖）：在 go.mod 底部强行追加 8 大核心工具包 replace 规则！
+        # 3. 终极天罗地网劫持：在 go.mod 底部强行追加 8 大核心工具包 replace 规则！
+        # 彻底断绝任何高版本子依赖包在公网拉取时的强行验证阻断！
         echo "replace golang.org/x/net => golang.org/x/net v0.33.0" >> cloudflared-src/go.mod
         echo "replace golang.org/x/term => golang.org/x/term v0.26.0" >> cloudflared-src/go.mod
         echo "replace golang.org/x/crypto => golang.org/x/crypto v0.31.0" >> cloudflared-src/go.mod
@@ -218,7 +219,8 @@ jobs:
         echo "replace golang.org/x/tools => golang.org/x/tools v0.29.0" >> cloudflared-src/go.mod
         echo "replace golang.org/x/mod => golang.org/x/mod v0.22.0" >> cloudflared-src/go.mod
         
-        # 4. 终极一锅端：强行劫持 OpenTelemetry (OTel) 家族全部 10 大核心/子包依赖到兼容 1.24 的 v1.34.0 稳定版本
+        # 4. 强行劫持 OpenTelemetry (OTel) 核心包依赖到兼容 1.24 的 v1.34.0 稳定版本
+        # 注意：此处彻底剔除了已经断代被官方废弃的 propagators 强替规则，保留其原本无害的 v0.22.0 默认引用
         echo "replace go.opentelemetry.io/otel => go.opentelemetry.io/otel v1.34.0" >> cloudflared-src/go.mod
         echo "replace go.opentelemetry.io/otel/metric => go.opentelemetry.io/otel/metric v1.34.0" >> cloudflared-src/go.mod
         echo "replace go.opentelemetry.io/otel/trace => go.opentelemetry.io/otel/trace v1.34.0" >> cloudflared-src/go.mod
@@ -229,9 +231,6 @@ jobs:
         echo "replace go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp => go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.34.0" >> cloudflared-src/go.mod
         echo "replace go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc => go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.34.0" >> cloudflared-src/go.mod
         echo "replace go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp => go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.34.0" >> cloudflared-src/go.mod
-        
-        # 修正点：将之前容易报错的 v0.59.0 修正为 100% 存在、稳定的 v0.50.0 官方版本
-        echo "replace go.opentelemetry.io/contrib/propagators => go.opentelemetry.io/contrib/propagators v0.50.0" >> cloudflared-src/go.mod
         
         cd cloudflared-src
         export CGO_ENABLED=0
