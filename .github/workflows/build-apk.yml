@@ -17,12 +17,12 @@ jobs:
       with:
         go-version: '1.24'
 
-    # 1. 编译底层的 LD_PRELOAD 端口劫持神器 libhijack.so
+    # 1. 编译底层的 LD_PRELOAD 端口劫持神器 libhijack.so (修复了 IPv6 漏网之鱼 Bug)
     - name: Compile LD_PRELOAD DNS Hijacker
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
         
-        # 用 C 语言写一个底层拦截器，将所有发往 53 端口的 UDP 报文，在操作系统层面强行拐弯到 53533 端口
+        # 极硬核 C 语言底层拦截器
         cat << 'EOF' > hijack.c
         #define _GNU_SOURCE
         #include <dlfcn.h>
@@ -37,6 +37,7 @@ jobs:
             orig_connect_func_type orig_connect;
             orig_connect = (orig_connect_func_type)dlsym(RTLD_NEXT, "connect");
 
+            // 无论是 IPv4 还是 IPv6，只要目标端口是 53，我们统统强行覆写为 IPv4 结构体指向 127.0.0.1:53533
             if (addr->sa_family == AF_INET) {
                 struct sockaddr_in *sin = (struct sockaddr_in *)addr;
                 if (ntohs(sin->sin_port) == 53) {
@@ -46,9 +47,17 @@ jobs:
             } else if (addr->sa_family == AF_INET6) {
                 struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
                 if (ntohs(sin6->sin6_port) == 53) {
-                    sin6->sin6_port = htons(53533);
+                    // 核心修复点：遇到 IPv6 解析时，将其整个地址结构强行降级、篡改为 IPv4，指向拦截器
+                    struct sockaddr_in faked_ipv4;
+                    memset(&faked_ipv4, 0, sizeof(faked_ipv4));
+                    faked_ipv4.sin_family = AF_INET;
+                    faked_ipv4.sin_port = htons(53533);
+                    faked_ipv4.sin_addr.s_addr = inet_addr("127.0.0.1");
+                    
+                    return orig_connect(sockfd, (struct sockaddr *)&faked_ipv4, sizeof(faked_ipv4));
                 }
             }
+            
             return orig_connect(sockfd, addr, addrlen);
         }
         EOF
@@ -59,7 +68,6 @@ jobs:
           CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android*-clang" | head -n 1)
         fi
         
-        # 编译出强悍的劫持库
         $CLANG_PATH -shared -fPIC -o app/src/main/jniLibs/arm64-v8a/libhijack.so hijack.c
 
     # 2. 编译并生成适用于 Android 的 libcloudflared.so
@@ -67,7 +75,7 @@ jobs:
       run: |
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 注入 Go 全局高阶 DNS 拦截服务器（运行在 53533 端口，接收底层 C 库拐过来的流量）
+        # 注入 Go 全局高阶 DNS 拦截服务器
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
@@ -82,6 +90,7 @@ jobs:
         }
 
         func startLocalDNSServer() {
+            // 监听 IPv4 的 53533 端口
             addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:53533")
             conn, err := net.ListenUDP("udp", addr)
             if err != nil { return }
@@ -96,17 +105,17 @@ jobs:
                 domain := parseDNSQueryDomain(query)
                 preferredIP := os.Getenv("PREFERRED_IP")
 
+                // 精确制导拦截
                 if preferredIP != "" && strings.Contains(domain, "argotunnel.com") {
                     qTypeOffset := n - 4
                     if qTypeOffset > 12 {
-                        // SRV 和 A 记录通通强杀拦截，塞入优选 IP A 记录响应
+                        // 无差别拦截所有类型请求（A/AAAA/SRV），全部用强硬 A 记录把内核堵死在优选 IP 上！
                         response := fakedDNSResponse(query, preferredIP)
                         conn.WriteToUDP(response, clientAddr)
                         continue
                     }
                 }
 
-                // 常规请求，透明转发给阿里 DNS
                 go forwardDNS(conn, clientAddr, query)
             }
         }
@@ -164,14 +173,8 @@ jobs:
         
         cd cloudflared-src
         
-        # 完全抛弃修改 Go 源码环境，不使用静态编译。启用 CGO_ENABLED=1，让内核使用底层的动态 libc 链接
-        # 这样它就会百分之百中我们布置的 LD_PRELOAD 连环陷阱！
+        # 启用 CGO 链接，确保生成的 cloudflared 内核会调用系统的 libc 从而掉进我们的 LD_PRELOAD 陷阱
         export CGO_ENABLED=1
-        NDK_PATH=$ANDROID_NDK_LATEST_HOME
-        CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android26-clang" | head -n 1)
-        if [ -z "$CLANG_PATH" ]; then
-          CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android*-clang" | head -n 1)
-        fi
         export CC=$CLANG_PATH
         export GOOS=android
         export GOARCH=arm64
@@ -180,7 +183,6 @@ jobs:
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
-        ls -lh app/src/main/jniLibs/arm64-v8a/
 
     # 3. 配置 Java 运行环境
     - name: Set up JDK 17
