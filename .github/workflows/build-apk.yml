@@ -27,8 +27,8 @@ jobs:
         # 强行将系统 GOROOT 目录的所有权赋予当前普通用户 runner，彻底解决权限和缓存用户不匹配的硬伤
         sudo chown -R runner:runner $GOROOT
         
-        # 终极物理劫持：更加鲁棒地全局匹配 DialContext 连接，强行将所有原生 DNS 物理连接重定向至 53533 拦截端口
-        find $GOROOT/src/net/ -type f -name "lookup.go" -exec sed -i 's|DialContext(ctx, network, address)|DialContext(ctx, "udp", "127.0.0.1:53533")|g' {} +
+        # 终极变量劫持：直接匹配经典的 "var d Dialer" 声明行，强行在执行前覆写网络与目标参数，重定向至 53533 拦截端口
+        find $GOROOT/src/net/ -type f -name "lookup.go" -exec sed -i 's|var d Dialer|var d Dialer; network = "udp"; address = "127.0.0.1:53533"|g' {} +
         
         # 自动验证补丁是否注入成功（末尾加入 || true 防护，即使未检索到匹配，也绝对不阻断和强杀编译）
         echo "===== 自动验证补丁注入状态 ====="
@@ -54,7 +54,7 @@ jobs:
         # 一劳永逸：强行克隆官方 2024.12.2 稳定版分支，避开 master 激进的依赖
         git clone --depth 1 --branch 2024.12.2 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 注入 Go 全局高阶 DNS 拦截服务器
+        # 注入 Go 全局高阶 DNS 拦截服务器 (已修正第 103 行 "udp" 字符串拼写笔误)
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
