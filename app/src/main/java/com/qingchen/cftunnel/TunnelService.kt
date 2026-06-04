@@ -70,11 +70,50 @@ class TunnelService : Service() {
         val authPassword = intent?.getStringExtra("auth_password") ?: ""
         val protocolMode = intent?.getIntExtra("protocol_mode", 0) ?: 0
         
+        // 接收来自 UI 的优选 IP 策略
         val usePreferredIp = intent?.getBooleanExtra("use_preferred_ip", false) ?: false
         val preferredIp = intent?.getStringExtra("preferred_ip") ?: ""
 
         stopTunnelProcess()
         TunnelManager.startTunnel()
+
+        // 1. 动态写入 DNS resolv.conf
+        val resolvFile = File("/data/data/com.qingchen.cftunnel/files/resolv.conf")
+        try {
+            resolvFile.parentFile?.mkdirs()
+            resolvFile.writeText(
+                "nameserver 114.114.114.114\n" +
+                "nameserver 223.5.5.5\n" +
+                "nameserver 8.8.8.8\n" +
+                "nameserver 1.1.1.1\n"
+            )
+            LogManager.addLog("Service", "本地 DNS 配置文件 resolv.conf 已成功写入物理路径")
+        } catch (e: Exception) {
+            LogManager.addLog("Service_Error", "写入 resolv.conf 配置文件失败: ${e.message}")
+        }
+
+        // 2. 核心补位：动态写入/清理我们劫持后的 Hosts 静态文件 (用于 Cloudflare 优选 IP 强行指流)
+        val hostsFile = File("/data/data/com.qingchen.cftunnel/files/hosts")
+        if (usePreferredIp && preferredIp.isNotEmpty()) {
+            try {
+                hostsFile.parentFile?.mkdirs()
+                hostsFile.writeText(
+                    "$preferredIp api.trycloudflare.com\n" +
+                    "$preferredIp region1.v2.argotunnel.com\n" +
+                    "$preferredIp region2.v2.argotunnel.com\n" +
+                    "$preferredIp api.cloudflare.com\n"
+                )
+                LogManager.addLog("Service", "🚀 [优选 IP 启用成功]：已在 hosts 中强制将 Cloudflare 广域域名指流至: $preferredIp")
+            } catch (e: Exception) {
+                LogManager.addLog("Service_Error", "写入 hosts 优选规则失败: ${e.message}")
+            }
+        } else {
+            // 如果用户关闭，强行删除该物理映射文件，使内核自动无缝回退到标准公共 DNS 解析
+            if (hostsFile.exists()) {
+                hostsFile.delete()
+                LogManager.addLog("Service", "已关闭优选 IP 加速，已安全删除本地 hosts 缓存规则")
+            }
+        }
 
         if (mode == 0 && useFileServer && sharePath.isNotEmpty()) {
             val success = FileServer.start(port.toInt(), sharePath, allowUpload, useAuth, authPassword)
@@ -91,7 +130,6 @@ class TunnelService : Service() {
             try {
                 val nativeDir = applicationInfo.nativeLibraryDir
                 val fileSO = File(nativeDir, "libcloudflared.so")
-                val hijackSO = File(nativeDir, "libhijack.so")
 
                 if (!fileSO.exists()) {
                     LogManager.addLog("Service_Error", "libcloudflared.so 动态库在本地 nativeLibraryDir 目录中未找到")
@@ -100,9 +138,11 @@ class TunnelService : Service() {
                 }
 
                 try {
+                    LogManager.addLog("Service", "正在尝试对底层内核授予可执行权限 (r-xr-xr-x)...")
                     fileSO.setExecutable(true, false)
-                    hijackSO.setExecutable(true, false)
+                    LogManager.addLog("Service", "授权完成，权限状态：rwx=${fileSO.canExecute()}")
                 } catch (e: Exception) {
+                    LogManager.addLog("Service_Error", "授权失败: ${e.message}")
                     lastLogs.add("授权执行失败: ${e.message}")
                 }
 
@@ -114,24 +154,18 @@ class TunnelService : Service() {
                     listOf(fileSO.absolutePath, "tunnel", "--protocol", protocolStr, "run", "--token", token)
                 }
 
+                LogManager.addLog("Service", "构建执行进程指令: ${command.joinToString(" ")}")
+
                 val pb = ProcessBuilder(command)
                 pb.environment()["HOME"] = filesDir.absolutePath
-                
-                // 终极绝杀：强行注入 LD_PRELOAD 底层系统劫持
-                pb.environment()["LD_PRELOAD"] = hijackSO.absolutePath
-                
-                if (usePreferredIp && preferredIp.isNotEmpty()) {
-                    pb.environment()["PREFERRED_IP"] = preferredIp
-                    LogManager.addLog("Service", "🚀 [C语言底层强拦截已载入]：所有的系统级 DNS 请求将被强制物理弯折至 53533 端口！")
-                } else {
-                    pb.environment()["PREFERRED_IP"] = ""
-                }
+                pb.environment()["GODEBUG"] = "netdns=go"
                 
                 pb.redirectErrorStream(true)
 
                 LogManager.addLog("Service", "正在拉起 ProcessBuilder 执行底层二进制进程...")
                 val proc = pb.start()
                 process = proc
+                LogManager.addLog("Service", "成功拉起二进制内核进程，PID = ${getProcessId(proc)}")
 
                 val reader = BufferedReader(InputStreamReader(proc.inputStream))
                 var line: String?
@@ -144,7 +178,6 @@ class TunnelService : Service() {
                         lastLogs.removeAt(0)
                     }
                     lastLogs.add(logLine)
-                    LogManager.addLog("Kernel", logLine)
 
                     if (mode == 0 && logLine.contains("trycloudflare.com")) {
                         val regex = Regex("https://[a-zA-Z0-9-]+\\.trycloudflare\\.com")
@@ -186,17 +219,29 @@ class TunnelService : Service() {
         try {
             process?.destroy()
             process = null
-        } catch (e: Exception) {}
+            LogManager.addLog("Service", "已向内核进程发送销毁信号 (SIGKILL/destroy)")
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     override fun onDestroy() {
+        LogManager.addLog("Service", "onDestroy()：后台保活服务生命周期结束，正在执行资源回收...")
         stopTunnelProcess()
         FileServer.stop()
         
         try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-            if (wifiLock?.isHeld == true) wifiLock?.release()
-        } catch (e: Exception) {}
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+                LogManager.addLog("Service", "🔓 已安全释放 CPU 唤醒锁 (WakeLock)")
+            }
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
+                LogManager.addLog("Service", "🔓 已安全释放 Wi-Fi 高性能锁 (WifiLock)")
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
 
         TunnelManager.stopTunnel()
         super.onDestroy()
