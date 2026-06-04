@@ -18,40 +18,189 @@ jobs:
       with:
         go-version: '1.22'
 
-    # 2. 核心补丁：使用 sudo 超级用户特权，强制重定向 GOROOT 中的 resolv.conf 和 hosts 路径，彻底绕开安卓软链接阻断
-    - name: Patch Go DNS & Hosts Resolver for Android
+    # 2. 核心补丁：使用 sudo 超级特权，强行劫持 Go 网络库在安卓上无 DNS 时的默认回退地址 (127.0.0.1:53 / [::1]:53)，重定向到我们的拦截端口 53533
+    - name: Patch Go DNS Resolver Fallbacks for Android
       run: |
         GOROOT=$(go env GOROOT)
         echo "Go Root found at: $GOROOT"
         
-        # 使用 sudo 强制获取系统最高权限，无视只读约束，强行对 *.go 源码完成绝对物理路径 /data/user/0/ 劫持
-        sudo find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"/etc/resolv.conf"|"/data/user/0/com.qingchen.cftunnel/files/resolv.conf"|g' {} +
-        sudo find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"/etc/hosts"|"/data/user/0/com.qingchen.cftunnel/files/hosts"|g' {} +
-        sudo find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|runtime.GOOS == "android"|false|g' {} +
+        # 使用 sudo 强制获取最高权限，无视只读约束，强行对 *.go 源码完成硬编码的 53 端口重定向
+        sudo find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"127.0.0.1:53"|"127.0.0.1:53533"|g' {} +
+        sudo find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"[::1]:53"|"127.0.0.1:53533"|g' {} +
         
-        # 自动验证补丁是否成功写入
+        # 自动验证补丁是否注入成功
         echo "===== 自动验证补丁注入状态 ====="
-        grep -rn "com.qingchen.cftunnel" $GOROOT/src/net/
+        grep -rn "127.0.0.1:53533" $GOROOT/src/net/
         echo "=============================="
 
-    # 3. 使用 sudo -E 强制对 net 标准网络包进行安全重构 (确保保留安卓 CPU 编译环境变量，并写入系统缓存目录)
+    # 3. 使用 sudo -E 强制对 net 标准网络包进行安全重构
     - name: Force Rebuild Patched Go Net Package
       run: |
         export CGO_ENABLED=0
         export GOOS=android
         export GOARCH=arm64
         
-        # -E 参数至关重要，用于在 sudo 提权时保留上面 export 的安卓交叉编译环境变量
         sudo -E go install -a net
         echo "Patched standard net package compiled and cached successfully!"
 
-    # 4. 编译并生成 (纯 Go 静态编译，不再使用全局 -a，直接读取上面重构好的 net.a 缓存包)
+    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端)
     - name: Compile cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
+        
+        # 注入 Go 全局高阶 DNS 拦截服务器
+        cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
+        package main
+
+        import (
+            "context"
+            "net"
+            "os"
+            "strings"
+        )
+
+        func init() {
+            // 异步拉起本地极简拦截 DNS 服务
+            go startLocalDNSServer()
+
+            // 重定向 net.DefaultResolver 到本地 53533 端口
+            net.DefaultResolver = &net.Resolver{
+                PreferGo: true,
+                Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+                    var d net.Dialer
+                    return d.DialContext(ctx, "udp", "127.0.0.1:53533")
+                },
+            }
+        }
+
+        func startLocalDNSServer() {
+            addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:53533")
+            if err != nil {
+                return
+            }
+            conn, err := net.ListenUDP("udp", addr)
+            if err != nil {
+                return
+            }
+            defer conn.Close()
+
+            buf := make([]byte, 1024)
+            for {
+                n, clientAddr, err := conn.ReadFromUDP(buf)
+                if err != nil {
+                    continue
+                }
+                query := buf[:n]
+
+                // 解析请求的域名
+                domain := parseDNSQueryDomain(query)
+                preferredIP := os.Getenv("PREFERRED_IP")
+
+                // 如果启用了优选 IP，且当前查询是 Cloudflare 穿透核心域名
+                if preferredIP != "" && (strings.Contains(domain, "trycloudflare.com") || 
+                    strings.Contains(domain, "argotunnel.com") || 
+                    strings.Contains(domain, "cloudflare.com")) {
+                    
+                    qTypeOffset := n - 4
+                    if qTypeOffset > 12 {
+                        qType := (uint16(query[qTypeOffset]) << 8) | uint16(query[qTypeOffset+1])
+                        if qType == 1 { // A 记录查询，强行伪造 DNS 响应体
+                            response := fakedDNSResponse(query, preferredIP)
+                            conn.WriteToUDP(response, clientAddr)
+                            continue
+                        }
+                    }
+                }
+
+                // 常规请求，统一、直接转发给公网公共 DNS (114.114.114.114:53)，绕过安卓系统所有沙盒限制
+                go forwardDNS(conn, clientAddr, query)
+            }
+        }
+
+        func forwardDNS(localConn *net.UDPConn, clientAddr *net.UDPAddr, query []byte) {
+            serverAddr, err := net.ResolveUDPAddr("udp", "114.114.114.114:53")
+            if err != nil {
+                return
+            }
+            serverConn, err := net.DialUDP("udp", nil, serverAddr)
+            if err != nil {
+                return
+            }
+            defer serverConn.Close()
+
+            _, err = serverConn.Write(query)
+            if err != nil {
+                return
+            }
+
+            respBuf := make([]byte, 1024)
+            n, err := serverConn.Read(respBuf)
+            if err != nil {
+                return
+            }
+
+            localConn.WriteToUDP(respBuf[:n], clientAddr)
+        }
+
+        func parseDNSQueryDomain(query []byte) string {
+            if len(query) < 12 {
+                return ""
+            }
+            var domains []string
+            offset := 12
+            for {
+                if offset >= len(query) {
+                    break
+                }
+                length := int(query[offset])
+                if length == 0 {
+                    break
+                }
+                offset++
+                if offset+length > len(query) {
+                    break
+                }
+                domains = append(domains, string(query[offset:offset+length]))
+                offset += length
+            }
+            return strings.Join(domains, ".")
+        }
+
+        func fakedDNSResponse(query []byte, ipStr string) []byte {
+            ip := net.ParseIP(ipStr).To4()
+            if ip == nil {
+                return query
+            }
+
+            resp := make([]byte, len(query))
+            copy(resp, query)
+
+            // 修改 Flags 为 DNS 响应成功标志 (0x8180)
+            resp[2] = 0x81
+            resp[3] = 0x80
+
+            // 修改 Answer RRs 数量为 1
+            resp[6] = 0x00
+            resp[7] = 0x01
+
+            // 构造标准 A 记录 Answer 响应体
+            answer := []byte{
+                0xc0, 0x0c,                 // 域名指针
+                0x00, 0x01,                 // Type: A
+                0x00, 0x01,                 // Class: IN
+                0x00, 0x00, 0x00, 0x3c,     // TTL: 60s
+                0x00, 0x04,                 // Length: 4 字节
+                ip[0], ip[1], ip[2], ip[3], // 优选 IP 的 4 字节数据
+            }
+
+            return append(resp, answer...)
+        }
+        EOF
+        
         cd cloudflared-src
         
+        # 启用 100% 极速静态纯 Go 编译，不碰 NDK，不再需要全局 -a，确保二进制内核绝对稳定、绝不闪退
         export CGO_ENABLED=0
         export GOOS=android
         export GOARCH=arm64
