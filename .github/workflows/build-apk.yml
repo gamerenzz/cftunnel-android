@@ -1,10 +1,7 @@
 name: Build Android APK
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+
   workflow_dispatch:
 
 jobs:
@@ -15,11 +12,13 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
+    # 1. 顺应 cloudflared 最新官方源码需求，直接配置 Go 1.24 环境
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.22'
+        go-version: '1.24'
 
+    # 2. 核心特权劫持：使用 sudo 夺取系统 Go 源码控制权，强行把 Go 在安卓上无 DNS 时的默认兜底回退地址替换为我们的 53533 拦截端口
     - name: Patch Go DNS Resolver Fallbacks for Android
       run: |
         GOROOT=$(go env GOROOT)
@@ -34,6 +33,7 @@ jobs:
         grep -rn "127.0.0.1:53533" $GOROOT/src/net/
         echo "=============================="
 
+    # 3. 强行且仅对 net 标准网络包进行安全重构
     - name: Force Rebuild Patched Go Net Package
       run: |
         export CGO_ENABLED=0
@@ -43,12 +43,13 @@ jobs:
         go install -a net
         echo "Patched standard net package compiled and cached successfully!"
 
+    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入终极高阶 DNS 拦截服务端)
     - name: Compile cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 终极高阶 DNS 拦截服务端：全类型查询拦截与响应伪造
+        # 终极全类型查询拦截与响应伪造服务端
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
@@ -93,26 +94,24 @@ jobs:
                 domain := parseDNSQueryDomain(query)
                 preferredIP := os.Getenv("PREFERRED_IP")
 
-                // 如果启用了优选 IP，且当前查询是 Cloudflare 穿透核心域名
+                // 终极强锁：如果启用了优选 IP，且请求的是高带宽流量管道 (argotunnel.com)
                 if preferredIP != "" && strings.Contains(domain, "argotunnel.com") {
-                    
                     qTypeOffset := n - 4
                     if qTypeOffset > 12 {
-                        // 无论内核请求的是 A(1), AAAA(28), 还是 SRV(33)，我们统统拦截！
-                        // 强行向内核伪造并返回一个 A 记录响应包，把内核彻底锁死在我们的优选 IP 上！
+                        // 无差别拦截所有类型请求（A/AAAA/SRV），全部用强硬 A 记录把内核堵死在优选 IP 上！
                         response := fakedDNSResponse(query, preferredIP)
                         conn.WriteToUDP(response, clientAddr)
                         continue
                     }
                 }
 
-                // 常规请求或免域名注册请求，放行给 114
+                // 常规请求，统一转发给阿里 DNS
                 go forwardDNS(conn, clientAddr, query)
             }
         }
 
         func forwardDNS(localConn *net.UDPConn, clientAddr *net.UDPAddr, query []byte) {
-            serverAddr, err := net.ResolveUDPAddr("udp", "114.114.114.114:53")
+            serverAddr, err := net.ResolveUDPAddr("udp", "223.5.5.5:53")
             if err != nil {
                 return
             }
@@ -172,23 +171,26 @@ jobs:
             // Flags: 响应成功 (0x8180)
             resp[2] = 0x81
             resp[3] = 0x80
+            
             // Answer RRs 数量
             resp[6] = 0x00
             resp[7] = 0x01
+            
             // Authority RRs = 0
             resp[8] = 0x00
             resp[9] = 0x00
+            
             // Additional RRs = 0
             resp[10] = 0x00
             resp[11] = 0x00
 
             // 构造强硬的 A 记录 Answer
             answer := []byte{
-                0xc0, 0x0c,                 // 域名指针指向请求
+                0xc0, 0x0c,                 // 域名指针
                 0x00, 0x01,                 // Type: A
                 0x00, 0x01,                 // Class: IN
                 0x00, 0x00, 0x00, 0x3c,     // TTL: 60s
-                0x00, 0x04,                 // Length: 4 bytes
+                0x00, 0x04,                 // Length: 4 字节
                 ip[0], ip[1], ip[2], ip[3], // 注入的优选 IP
             }
 
@@ -196,30 +198,13 @@ jobs:
         }
         EOF
         
-        # 将 go.mod 降级与剥离工具链拦截
-        sed -i 's|^go 1\.[0-9]\+|go 1.22|g' cloudflared-src/go.mod
-        sed -i '/^toolchain/d' cloudflared-src/go.mod
-        
-        # 降级所有 vendor 依赖树
-        if [ -d "cloudflared-src/vendor" ]; then
-          echo "Found local vendor cache. Applying dependency downgrades..."
-          sed -i 's|go 1\.26|go 1.22|g' cloudflared-src/vendor/modules.txt
-          sed -i 's|go 1\.25|go 1.22|g' cloudflared-src/vendor/modules.txt
-          sed -i 's|go 1\.24|go 1.22|g' cloudflared-src/vendor/modules.txt
-          sed -i 's|go 1\.23|go 1.22|g' cloudflared-src/vendor/modules.txt
-          find cloudflared-src/vendor/ -name "go.mod" -exec sed -i 's|^go 1\.[0-9]\+|go 1.22|g' {} +
-        fi
-        
         cd cloudflared-src
         export CGO_ENABLED=0
         export GOOS=android
         export GOARCH=arm64
         
-        export GOTOOLCHAIN=local
-        mkdir -p /tmp/go-clean-cache
-        export GOCACHE=/tmp/go-clean-cache
-        
-        echo "Starting pure Go static compilation with Clean-GOCACHE, Local-Toolchain and Dependency-Downgrade..."
+        # 抛弃一切魔改的缓存和工具链，直接顺畅编译！
+        echo "Starting pure Go static compilation with injected DNS intercepter..."
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
