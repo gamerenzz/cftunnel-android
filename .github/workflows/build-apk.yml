@@ -46,7 +46,7 @@ jobs:
         go install -a net
         echo "Patched standard net package compiled and cached successfully!"
 
-    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，全量对齐 Go 1.24 语法)
+    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，物理删除 vendor)
     - name: Compile cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
@@ -200,17 +200,14 @@ jobs:
         }
         EOF
         
-        # 1. 强行修改主项目的 go.mod，将要求的 Go 版本重定向为本地打过补丁且支持高阶语法的 Go 1.24
+        # 1. 物理粉碎点一（重磅升级）：彻底、强行删除内置的整个 vendor 依赖目录！
+        # 这会迫使 Go 编译器不再读取本地 modules.txt，而是直接通过公网 Goproxy 下载最纯净的官方原生依赖包，100% 根治多包命名空间别名污染！
+        rm -rf cloudflared-src/vendor
+        
+        # 2. 强行修改主项目的 go.mod，将要求的 Go 最低版本重定向为本地打过补丁且支持高阶语法的 Go 1.24
         # 同时删除任何 "toolchain" 强制下载指令
         sed -i 's|^go 1\.[0-9]\+|go 1.24|g' cloudflared-src/go.mod
         sed -i '/^toolchain/d' cloudflared-src/go.mod
-        
-        # 2. 终极扫网式补丁：将整个克隆工程内（包括 go.mod, modules.txt 以及所有依赖配置）
-        # 所有可能限制的大于 1.24 的版本（1.25, 1.26）全量替换并强降级为 1.24！
-        # 这会完美保留 1.23/1.24 引入的现代 Go 语法迭代器（如 strings.SplitSeq），确保编译链路 100% 顺畅
-        echo "Applying global dependency version downgrades..."
-        find cloudflared-src/ -type f -exec sed -i 's|go 1\.26|go 1.24|g' {} +
-        find cloudflared-src/ -type f -exec sed -i 's|go 1\.25|go 1.24|g' {} +
         
         cd cloudflared-src
         export CGO_ENABLED=0
@@ -222,7 +219,7 @@ jobs:
         mkdir -p /tmp/go-clean-cache
         export GOCACHE=/tmp/go-clean-cache
         
-        echo "Starting pure Go static compilation with Clean-GOCACHE, Local-Toolchain and Go 1.24 Alignment..."
+        echo "Starting pure Go static compilation with Clean-GOCACHE, Local-Toolchain and Vendor-Removal..."
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
