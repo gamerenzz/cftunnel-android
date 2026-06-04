@@ -18,7 +18,7 @@ jobs:
       with:
         go-version: '1.22'
 
-    # 2. 核心特权劫持：夺取 GOROOT 目录所有权，统一普通用户缓存，强行完成底层 53 端口回退重定向
+    # 2. 核心特权劫持：夺取 GOROOT 目录所有权，统一普通用户缓存，强行完成底层 53 端口回退重定向并物理粉碎旧预编译包
     - name: Patch Go DNS Resolver Fallbacks for Android
       run: |
         GOROOT=$(go env GOROOT)
@@ -31,18 +31,23 @@ jobs:
         find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"127.0.0.1:53"|"127.0.0.1:53533"|g' {} +
         find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"[::1]:53"|"127.0.0.1:53533"|g' {} +
         
+        # 物理粉碎点：强行删除 GOROOT 目录下的所有旧版安卓预编译静态库。这会迫使接下来的 go 编译器物理重编打过补丁的 net 包！
+        rm -rf $GOROOT/pkg/android_arm64
+        rm -rf $GOROOT/pkg/android_arm64_shared
+        
         # 自动验证补丁是否注入成功
         echo "===== 自动验证补丁注入状态 ====="
         grep -rn "127.0.0.1:53533" $GOROOT/src/net/
         echo "=============================="
 
-    # 3. 强行且仅对 net 标准网络包进行安全重构
+    # 3. 强行且仅对 net 标准网络包进行安全重构 (运行在当前普通用户 runner 状态下，确保编译出的缓存能被接下来的构建完美加载)
     - name: Force Rebuild Patched Go Net Package
       run: |
         export CGO_ENABLED=0
         export GOOS=android
         export GOARCH=arm64
         
+        # 作为普通用户直接编译，由于我们删除了 pkg，这里会从 net 补丁源码中物理重构出 net.a 缓存
         go install -a net
         echo "Patched standard net package compiled and cached successfully!"
 
@@ -52,7 +57,7 @@ jobs:
         mkdir -p app/src/main/jniLibs/arm64-v8a
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 注入 Go 全局高阶 DNS 拦截服务器
+        # 再次注入高阶局部 DNS 劫持服务端
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
@@ -100,9 +105,10 @@ jobs:
                 domain := parseDNSQueryDomain(query)
                 preferredIP := os.Getenv("PREFERRED_IP")
 
-                // 核心重构：只拦截并加速 argotunnel.com（高带宽流量管道）到优选 IP
-                // 让 trycloudflare.com（仅用于初始注册，数据微小）走公共 DNS 默认解析，避开 1101 节点故障
-                if preferredIP != "" && strings.Contains(domain, "argotunnel.com") {
+                // 如果启用了优选 IP，且当前查询是 Cloudflare 穿透核心域名
+                if preferredIP != "" && (strings.Contains(domain, "trycloudflare.com") || 
+                    strings.Contains(domain, "argotunnel.com") || 
+                    strings.Contains(domain, "cloudflare.com")) {
                     
                     qTypeOffset := n - 4
                     if qTypeOffset > 12 {
@@ -115,7 +121,7 @@ jobs:
                     }
                 }
 
-                // 常规请求，统一、直接转发给公网公共 DNS (114.114.114.114:53)
+                // 常规请求，统一、直接转发给公共 DNS (114.114.114.114:53)
                 go forwardDNS(conn, clientAddr, query)
             }
         }
