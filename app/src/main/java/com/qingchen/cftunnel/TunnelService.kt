@@ -76,45 +76,6 @@ class TunnelService : Service() {
         stopTunnelProcess()
         TunnelManager.startTunnel()
 
-        // 1. 写入 DNS 配置文件 resolv.conf (使用真实物理路径 filesDir)
-        val resolvFile = File(filesDir, "resolv.conf")
-        try {
-            resolvFile.parentFile?.mkdirs()
-            resolvFile.writeText(
-                "nameserver 223.5.5.5\n" +
-                "nameserver 8.8.8.8\n" +
-                "nameserver 1.1.1.1\n"
-            )
-            LogManager.addLog("Service", "本地 DNS 配置文件 resolv.conf 已成功写入物理路径: ${resolvFile.absolutePath}")
-        } catch (e: Exception) {
-            LogManager.addLog("Service_Error", "写入 resolv.conf 配置文件失败: ${e.message}")
-        }
-
-        // 2. 写入 优选 IP hosts 映射文件 (使用真实物理路径 filesDir，彻底绕过软链接阻断)
-        val hostsFile = File(filesDir, "hosts")
-        if (usePreferredIp && preferredIp.isNotEmpty()) {
-            try {
-                hostsFile.parentFile?.mkdirs()
-                hostsFile.writeText(
-                    "$preferredIp api.trycloudflare.com\n" +
-                    "$preferredIp region1.v2.argotunnel.com\n" +
-                    "$preferredIp region2.v2.argotunnel.com\n" +
-                    "$preferredIp api.cloudflare.com\n"
-                )
-                LogManager.addLog("Service", "🚀 [代码级 hosts 劫持已启用]：已将 Cloudflare 广域域名强制指向优选 IP: $preferredIp")
-            } catch (e: Exception) {
-                LogManager.addLog("Service_Error", "写入 hosts 优选规则失败: ${e.message}")
-            }
-        } else {
-            try {
-                hostsFile.parentFile?.mkdirs()
-                hostsFile.writeText("127.0.0.1 localhost\n::1 localhost\n")
-                LogManager.addLog("Service", "已关闭优选 IP 加速，已恢复默认本地 hosts 规则")
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
         if (mode == 0 && useFileServer && sharePath.isNotEmpty()) {
             val success = FileServer.start(port.toInt(), sharePath, allowUpload, useAuth, authPassword)
             if (!success) {
@@ -159,6 +120,14 @@ class TunnelService : Service() {
                 val pb = ProcessBuilder(command)
                 pb.environment()["HOME"] = filesDir.absolutePath
                 pb.environment()["GODEBUG"] = "netdns=go" // 强行指定 Go 使用内置的 netgo 解析器
+                
+                // 终极设计：通过环境变量直接向内核内嵌的 DNS 服务器中灌入优选 IP，实现绝对稳定、零文件残留的极速加速
+                if (usePreferredIp && preferredIp.isNotEmpty()) {
+                    pb.environment()["PREFERRED_IP"] = preferredIp
+                    LogManager.addLog("Service", "🚀 [代码级 DNS 劫持已启用]：已将 Cloudflare 广域域名强制指向优选 IP: $preferredIp")
+                } else {
+                    pb.environment()["PREFERRED_IP"] = ""
+                }
                 
                 pb.redirectErrorStream(true)
 
