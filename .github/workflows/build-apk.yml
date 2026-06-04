@@ -101,10 +101,9 @@ jobs:
                 domain := parseDNSQueryDomain(query)
                 preferredIP := os.Getenv("PREFERRED_IP")
 
-                // 如果启用了优选 IP，且当前查询是 Cloudflare 穿透核心域名
-                if preferredIP != "" && (strings.Contains(domain, "trycloudflare.com") || 
-                    strings.Contains(domain, "argotunnel.com") || 
-                    strings.Contains(domain, "cloudflare.com")) {
+                // 核心重构：只拦截并加速 argotunnel.com（高带宽流量管道）到优选 IP
+                // 让 trycloudflare.com（仅用于初始注册，数据微小）走公共 DNS 默认解析，避开 1101 节点故障
+                if preferredIP != "" && strings.Contains(domain, "argotunnel.com") {
                     
                     qTypeOffset := n - 4
                     if qTypeOffset > 12 {
@@ -202,17 +201,17 @@ jobs:
         }
         EOF
         
-        # 1. 强行修改主项目的 go.mod，降级 Go 最低版本并剔除 toolchain 指令
+        # 1. 强行修改主项目的 go.mod，将要求的 Go 最低版本重定向为本地 1.22，并剔除 toolchain
         sed -i 's|^go 1\.[0-9]\+|go 1.22|g' cloudflared-src/go.mod
         sed -i '/^toolchain/d' cloudflared-src/go.mod
         
-        # 2. 核心补位：如果存在本地 vendor 缓存库，强制将其中的 modules.txt 与所有子模块 go.mod 的编译版本降级为 1.22
-        # 彻底截断 Go 编译器因为依赖包声明高版本而发生编译拦截的任何可能！
+        # 2. 核心补位：全量降级第三方依赖包。将任何要求 Go 1.23, 1.24, 1.25, 1.26 的地方全部一刀切降级为 1.22
         if [ -d "cloudflared-src/vendor" ]; then
           echo "Found local vendor cache. Applying dependency downgrades..."
           sed -i 's|go 1\.26|go 1.22|g' cloudflared-src/vendor/modules.txt
           sed -i 's|go 1\.25|go 1.22|g' cloudflared-src/vendor/modules.txt
           sed -i 's|go 1\.24|go 1.22|g' cloudflared-src/vendor/modules.txt
+          sed -i 's|go 1\.23|go 1.22|g' cloudflared-src/vendor/modules.txt
           find cloudflared-src/vendor/ -name "go.mod" -exec sed -i 's|^go 1\.[0-9]\+|go 1.22|g' {} +
         fi
         
