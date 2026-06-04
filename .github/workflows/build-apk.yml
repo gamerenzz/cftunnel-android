@@ -46,7 +46,7 @@ jobs:
         go install -a net
         echo "Patched standard net package compiled and cached successfully!"
 
-    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，追加依赖强替规则)
+    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，追加双重依赖强替规则)
     - name: Compile cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
@@ -208,9 +208,10 @@ jobs:
         sed -i 's|^go 1\.[0-9]\+|go 1.24|g' cloudflared-src/go.mod
         sed -i '/^toolchain/d' cloudflared-src/go.mod
         
-        # 3. 核心重定向：在 go.mod 底部强行追加 replace 规则，将高版本网络库依赖强制替换为兼容 Go 1.24 的稳定版 v0.33.0
+        # 3. 核心重定向（双重替换）：在 go.mod 底部强行追加 replace 规则，将高版本依赖库（x/net, x/term）强制替换为兼容 Go 1.24 的稳定版
         # 彻底降维打击、绕过公网拉取时的版本强验证阻断！
         echo "replace golang.org/x/net => golang.org/x/net v0.33.0" >> cloudflared-src/go.mod
+        echo "replace golang.org/x/term => golang.org/x/term v0.26.0" >> cloudflared-src/go.mod
         
         cd cloudflared-src
         export CGO_ENABLED=0
@@ -222,7 +223,7 @@ jobs:
         mkdir -p /tmp/go-clean-cache
         export GOCACHE=/tmp/go-clean-cache
         
-        echo "Starting pure Go static compilation with Clean-GOCACHE and Dependency-Replacement..."
+        echo "Starting pure Go static compilation with Clean-GOCACHE and Double Dependency-Replacement..."
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
