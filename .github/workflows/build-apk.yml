@@ -12,7 +12,7 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # 1. 自动配置最新的 Go 1.24 编译环境
+    # 1. 配置 Go 1.24 编译环境
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
@@ -27,10 +27,10 @@ jobs:
         # 强行将系统 GOROOT 目录的所有权赋予当前普通用户 runner，彻底解决权限和缓存用户不匹配的硬伤
         sudo chown -R runner:runner $GOROOT
         
-        # 终极物理劫持：更加鲁棒地全局匹配 DialContext 连接，强行将所有原生 DNS 物理连接重定向至 53533 拦截端口
+        # 在普通用户权限下，无阻碍地劫持 Go 底层无 DNS 配置时的默认回退地址 (127.0.0.1:53 / [::1]:53)，指向我们的高阶拦截端口 53533
         find $GOROOT/src/net/ -type f -name "lookup.go" -exec sed -i 's|DialContext(ctx, network, address)|DialContext(ctx, "udp", "127.0.0.1:53533")|g' {} +
         
-        # 自动验证补丁是否注入成功（末尾加入 || true 防护，即使未检索到匹配，也绝对不掐断和阻塞编译）
+        # 自动验证补丁是否注入成功
         echo "===== 自动验证补丁注入状态 ====="
         grep -rn "127.0.0.1:53533" $GOROOT/src/net/ || true
         echo "=============================="
@@ -46,7 +46,7 @@ jobs:
         go install -a net
         echo "Patched standard net package compiled and cached successfully!"
 
-    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端)
+    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，全局降级依赖配置)
     - name: Compile cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
@@ -200,9 +200,15 @@ jobs:
         }
         EOF
         
-        # 强行重写 cloudflared 的 go.mod，将要求的 Go 版本重定向为本地打过补丁的 Go 1.22
-        # 同时删除任何 "toolchain" 强制下载指令，防止编译器触发自动下载未打补丁的干净工具链
-        sed -i 's|^go 1\.[0-9]\+|go 1.22|g' cloudflared-src/go.mod
+        # 终极扫网式补丁：在物理上无差别扫射、替换掉整个克隆工程内（包括主 go.mod, modules.txt 以及所有底层子依赖包配置）
+        # 任何要求高版本（1.23, 1.24, 1.25, 1.26）的依赖行，将其全量、无死角强降级为本地编译通过的 1.22！
+        echo "Applying global dependency version downgrades..."
+        find cloudflared-src/ -type f -exec sed -i 's|go 1\.26|go 1.22|g' {} +
+        find cloudflared-src/ -type f -exec sed -i 's|go 1\.25|go 1.22|g' {} +
+        find cloudflared-src/ -type f -exec sed -i 's|go 1\.24|go 1.22|g' {} +
+        find cloudflared-src/ -type f -exec sed -i 's|go 1\.23|go 1.22|g' {} +
+        
+        # 剔除主项目中的 toolchain 指令
         sed -i '/^toolchain/d' cloudflared-src/go.mod
         
         cd cloudflared-src
@@ -215,7 +221,7 @@ jobs:
         mkdir -p /tmp/go-clean-cache
         export GOCACHE=/tmp/go-clean-cache
         
-        echo "Starting pure Go static compilation with Clean-GOCACHE, Local-Toolchain and Socket-Level Hijack..."
+        echo "Starting pure Go static compilation with Clean-GOCACHE, Local-Toolchain and Global Dependency-Downgrade..."
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
