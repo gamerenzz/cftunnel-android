@@ -17,12 +17,20 @@ jobs:
       with:
         go-version: '1.24'
 
-    # 1. 编译底层的 LD_PRELOAD 端口劫持神器 libhijack.so (同频端口映射)
-    - name: Compile LD_PRELOAD DNS Hijacker
+    # 核心合并点：将 C语言劫持库编译 和 Go语言 CGO 编译合并在同一个物理容器块中，彻底解决变量丢失！
+    - name: Compile LD_PRELOAD Hijacker & cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
         
-        # 极硬核 C 语言底层拦截器
+        # 1. 自动定位宿主机上的 Android NDK 和 Clang 交叉编译器
+        NDK_PATH=$ANDROID_NDK_LATEST_HOME
+        CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android26-clang" | head -n 1)
+        if [ -z "$CLANG_PATH" ]; then
+          CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android*-clang" | head -n 1)
+        fi
+        echo "Successfully located Android Clang Compiler at: $CLANG_PATH"
+
+        # 2. 编写并使用定位到的编译器编译 C 语言底层同频劫持库 (IPv4+IPv6 端口篡改)
         cat << 'EOF' > hijack.c
         #define _GNU_SOURCE
         #include <dlfcn.h>
@@ -45,29 +53,22 @@ jobs:
             } else if (addr->sa_family == AF_INET6) {
                 struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
                 if (ntohs(sin6->sin6_port) == 53) {
-                    // 核心修复点：不再强行降级为 IPv4，而是同协议族只修改端口为 53533，将流量导向本机的 IPv6 拦截器
+                    // 同频篡改，仅重定向端口，防止 IPv6 结构体退回报错
                     sin6->sin6_port = htons(53533);
                 }
             }
-            
             return orig_connect(sockfd, addr, addrlen);
         }
         EOF
-
-        NDK_PATH=$ANDROID_NDK_LATEST_HOME
-        CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android26-clang" | head -n 1)
-        if [ -z "$CLANG_PATH" ]; then
-          CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android*-clang" | head -n 1)
-        fi
         
+        # 编译 C 劫持库
         $CLANG_PATH -shared -fPIC -o app/src/main/jniLibs/arm64-v8a/libhijack.so hijack.c
+        echo "libhijack.so compiled successfully!"
 
-    # 2. 编译并生成适用于 Android 的 libcloudflared.so
-    - name: Compile cloudflared for Android ARM64
-      run: |
+        # 3. 准备编译 Go 语言主程序
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 注入 Go 全局高阶 DNS 拦截服务器（开启 IPv4 + IPv6 双栈同时监听，彻底封杀所有逃逸请求）
+        # 注入 Go 全局高阶 DNS 拦截服务器（双栈同时监听，承接底层 C 库拐过来的流量）
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
@@ -102,7 +103,6 @@ jobs:
                 if preferredIP != "" && strings.Contains(domain, "argotunnel.com") {
                     qTypeOffset := n - 4
                     if qTypeOffset > 12 {
-                        // SRV 和 A/AAAA 记录通通强杀拦截，塞入优选 IP A 记录响应
                         response := fakedDNSResponse(query, preferredIP)
                         conn.WriteToUDP(response, clientAddr)
                         continue
@@ -167,8 +167,10 @@ jobs:
         
         cd cloudflared-src
         
+        # 4. 强制指定 CGO 交叉编译参数，引用刚刚在同一个 step 内获取到的完美 $CLANG_PATH 路径！
         export CGO_ENABLED=1
         export CC=$CLANG_PATH
+        export CXX="${CLANG_PATH}++"
         export GOOS=android
         export GOARCH=arm64
         
@@ -176,6 +178,7 @@ jobs:
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
+        ls -lh app/src/main/jniLibs/arm64-v8a/
 
     # 3. 配置 Java 运行环境
     - name: Set up JDK 17
