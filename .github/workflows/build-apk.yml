@@ -12,147 +12,129 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # 1. 顺应 cloudflared 最新官方源码需求，直接配置 Go 1.24 环境
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: '1.24'
 
-    # 2. 核心特权劫持：使用 sudo 夺取系统 Go 源码控制权，强行把 Go 在安卓上无 DNS 时的默认兜底回退地址替换为我们的 53533 拦截端口
-    - name: Patch Go DNS Resolver Fallbacks for Android
-      run: |
-        GOROOT=$(go env GOROOT)
-        echo "Go Root found at: $GOROOT"
-        
-        sudo chown -R runner:runner $GOROOT
-        
-        find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"127.0.0.1:53"|"127.0.0.1:53533"|g' {} +
-        find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"[::1]:53"|"127.0.0.1:53533"|g' {} +
-        
-        echo "===== 自动验证补丁注入状态 ====="
-        grep -rn "127.0.0.1:53533" $GOROOT/src/net/
-        echo "=============================="
-
-    # 3. 强行且仅对 net 标准网络包进行安全重构
-    - name: Force Rebuild Patched Go Net Package
-      run: |
-        export CGO_ENABLED=0
-        export GOOS=android
-        export GOARCH=arm64
-        
-        go install -a net
-        echo "Patched standard net package compiled and cached successfully!"
-
-    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入终极高阶 DNS 拦截服务端)
-    - name: Compile cloudflared for Android ARM64
+    # 1. 编译底层的 LD_PRELOAD 端口劫持神器 libhijack.so
+    - name: Compile LD_PRELOAD DNS Hijacker
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
+        
+        # 用 C 语言写一个底层拦截器，将所有发往 53 端口的 UDP 报文，在操作系统层面强行拐弯到 53533 端口
+        cat << 'EOF' > hijack.c
+        #define _GNU_SOURCE
+        #include <dlfcn.h>
+        #include <sys/socket.h>
+        #include <netinet/in.h>
+        #include <arpa/inet.h>
+        #include <string.h>
+
+        typedef int (*orig_connect_func_type)(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+
+        int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
+            orig_connect_func_type orig_connect;
+            orig_connect = (orig_connect_func_type)dlsym(RTLD_NEXT, "connect");
+
+            if (addr->sa_family == AF_INET) {
+                struct sockaddr_in *sin = (struct sockaddr_in *)addr;
+                if (ntohs(sin->sin_port) == 53) {
+                    sin->sin_port = htons(53533);
+                    sin->sin_addr.s_addr = inet_addr("127.0.0.1");
+                }
+            } else if (addr->sa_family == AF_INET6) {
+                struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
+                if (ntohs(sin6->sin6_port) == 53) {
+                    sin6->sin6_port = htons(53533);
+                }
+            }
+            return orig_connect(sockfd, addr, addrlen);
+        }
+        EOF
+
+        NDK_PATH=$ANDROID_NDK_LATEST_HOME
+        CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android26-clang" | head -n 1)
+        if [ -z "$CLANG_PATH" ]; then
+          CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android*-clang" | head -n 1)
+        fi
+        
+        # 编译出强悍的劫持库
+        $CLANG_PATH -shared -fPIC -o app/src/main/jniLibs/arm64-v8a/libhijack.so hijack.c
+
+    # 2. 编译并生成适用于 Android 的 libcloudflared.so
+    - name: Compile cloudflared for Android ARM64
+      run: |
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 终极全类型查询拦截与响应伪造服务端
+        # 注入 Go 全局高阶 DNS 拦截服务器（运行在 53533 端口，接收底层 C 库拐过来的流量）
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
         import (
-            "context"
-            "net"
             "os"
+            "net"
             "strings"
         )
 
         func init() {
             go startLocalDNSServer()
-
-            net.DefaultResolver = &net.Resolver{
-                PreferGo: true,
-                Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-                    var d net.Dialer
-                    return d.DialContext(ctx, "udp", "127.0.0.1:53533")
-                },
-            }
         }
 
         func startLocalDNSServer() {
-            addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:53533")
-            if err != nil {
-                return
-            }
+            addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:53533")
             conn, err := net.ListenUDP("udp", addr)
-            if err != nil {
-                return
-            }
+            if err != nil { return }
             defer conn.Close()
 
             buf := make([]byte, 1024)
             for {
                 n, clientAddr, err := conn.ReadFromUDP(buf)
-                if err != nil {
-                    continue
-                }
+                if err != nil { continue }
                 query := buf[:n]
 
                 domain := parseDNSQueryDomain(query)
                 preferredIP := os.Getenv("PREFERRED_IP")
 
-                // 终极强锁：如果启用了优选 IP，且请求的是高带宽流量管道 (argotunnel.com)
                 if preferredIP != "" && strings.Contains(domain, "argotunnel.com") {
                     qTypeOffset := n - 4
                     if qTypeOffset > 12 {
-                        // 无差别拦截所有类型请求（A/AAAA/SRV），全部用强硬 A 记录把内核堵死在优选 IP 上！
+                        // SRV 和 A 记录通通强杀拦截，塞入优选 IP A 记录响应
                         response := fakedDNSResponse(query, preferredIP)
                         conn.WriteToUDP(response, clientAddr)
                         continue
                     }
                 }
 
-                // 常规请求，统一转发给阿里 DNS
+                // 常规请求，透明转发给阿里 DNS
                 go forwardDNS(conn, clientAddr, query)
             }
         }
 
         func forwardDNS(localConn *net.UDPConn, clientAddr *net.UDPAddr, query []byte) {
-            serverAddr, err := net.ResolveUDPAddr("udp", "223.5.5.5:53")
-            if err != nil {
-                return
-            }
+            serverAddr, _ := net.ResolveUDPAddr("udp", "223.5.5.5:53")
             serverConn, err := net.DialUDP("udp", nil, serverAddr)
-            if err != nil {
-                return
-            }
+            if err != nil { return }
             defer serverConn.Close()
 
-            _, err = serverConn.Write(query)
-            if err != nil {
-                return
-            }
-
+            serverConn.Write(query)
             respBuf := make([]byte, 1024)
             n, err := serverConn.Read(respBuf)
-            if err != nil {
-                return
-            }
+            if err != nil { return }
 
             localConn.WriteToUDP(respBuf[:n], clientAddr)
         }
 
         func parseDNSQueryDomain(query []byte) string {
-            if len(query) < 12 {
-                return ""
-            }
+            if len(query) < 12 { return "" }
             var domains []string
             offset := 12
             for {
-                if offset >= len(query) {
-                    break
-                }
+                if offset >= len(query) { break }
                 length := int(query[offset])
-                if length == 0 {
-                    break
-                }
+                if length == 0 { break }
                 offset++
-                if offset+length > len(query) {
-                    break
-                }
+                if offset+length > len(query) { break }
                 domains = append(domains, string(query[offset:offset+length]))
                 offset += length
             }
@@ -161,56 +143,46 @@ jobs:
 
         func fakedDNSResponse(query []byte, ipStr string) []byte {
             ip := net.ParseIP(ipStr).To4()
-            if ip == nil {
-                return query
-            }
-
+            if ip == nil { return query }
             resp := make([]byte, len(query))
             copy(resp, query)
-
-            // Flags: 响应成功 (0x8180)
             resp[2] = 0x81
             resp[3] = 0x80
-            
-            // Answer RRs 数量
             resp[6] = 0x00
             resp[7] = 0x01
-            
-            // Authority RRs = 0
             resp[8] = 0x00
             resp[9] = 0x00
-            
-            // Additional RRs = 0
             resp[10] = 0x00
             resp[11] = 0x00
-
-            // 构造强硬的 A 记录 Answer
             answer := []byte{
-                0xc0, 0x0c,                 // 域名指针
-                0x00, 0x01,                 // Type: A
-                0x00, 0x01,                 // Class: IN
-                0x00, 0x00, 0x00, 0x3c,     // TTL: 60s
-                0x00, 0x04,                 // Length: 4 字节
-                ip[0], ip[1], ip[2], ip[3], // 注入的优选 IP
+                0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04,
+                ip[0], ip[1], ip[2], ip[3],
             }
-
             return append(resp, answer...)
         }
         EOF
         
         cd cloudflared-src
-        export CGO_ENABLED=0
+        
+        # 完全抛弃修改 Go 源码环境，不使用静态编译。启用 CGO_ENABLED=1，让内核使用底层的动态 libc 链接
+        # 这样它就会百分之百中我们布置的 LD_PRELOAD 连环陷阱！
+        export CGO_ENABLED=1
+        NDK_PATH=$ANDROID_NDK_LATEST_HOME
+        CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android26-clang" | head -n 1)
+        if [ -z "$CLANG_PATH" ]; then
+          CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android*-clang" | head -n 1)
+        fi
+        export CC=$CLANG_PATH
         export GOOS=android
         export GOARCH=arm64
         
-        # 抛弃一切魔改的缓存和工具链，直接顺畅编译！
-        echo "Starting pure Go static compilation with injected DNS intercepter..."
+        echo "Starting CGO compilation for Android ARM64..."
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
-        ls -lh app/src/main/jniLibs/arm64-v8a/libcloudflared.so
+        ls -lh app/src/main/jniLibs/arm64-v8a/
 
-    # 5. 配置 Java 运行环境
+    # 3. 配置 Java 运行环境
     - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
@@ -218,7 +190,7 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    # 6. 强制生成兼容的 Gradle 8.5 包装器并授予执行权限
+    # 4. 强制生成兼容的 Gradle 8.5 包装器并授予执行权限
     - name: Generate Gradle Wrapper
       run: |
         if [ ! -f "gradlew" ]; then
@@ -226,11 +198,11 @@ jobs:
         fi
         chmod +x gradlew
 
-    # 7. 执行打包命令
+    # 5. 执行打包命令
     - name: Build with Gradle
       run: ./gradlew assembleDebug
 
-    # 8. 将 APK 作为 Artifact 上传，供用户下载
+    # 6. 将 APK 作为 Artifact 上传，供用户下载
     - name: Upload Output APK
       uses: actions/upload-artifact@v4
       with:
