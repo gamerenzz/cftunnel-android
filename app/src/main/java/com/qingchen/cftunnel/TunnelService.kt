@@ -91,6 +91,7 @@ class TunnelService : Service() {
             try {
                 val nativeDir = applicationInfo.nativeLibraryDir
                 val fileSO = File(nativeDir, "libcloudflared.so")
+                val hijackSO = File(nativeDir, "libhijack.so")
 
                 if (!fileSO.exists()) {
                     LogManager.addLog("Service_Error", "libcloudflared.so 动态库在本地 nativeLibraryDir 目录中未找到")
@@ -99,11 +100,9 @@ class TunnelService : Service() {
                 }
 
                 try {
-                    LogManager.addLog("Service", "正在尝试对底层内核授予可执行权限 (r-xr-xr-x)...")
                     fileSO.setExecutable(true, false)
-                    LogManager.addLog("Service", "授权完成，权限状态：rwx=${fileSO.canExecute()}")
+                    hijackSO.setExecutable(true, false)
                 } catch (e: Exception) {
-                    LogManager.addLog("Service_Error", "授权失败: ${e.message}")
                     lastLogs.add("授权执行失败: ${e.message}")
                 }
 
@@ -115,16 +114,15 @@ class TunnelService : Service() {
                     listOf(fileSO.absolutePath, "tunnel", "--protocol", protocolStr, "run", "--token", token)
                 }
 
-                LogManager.addLog("Service", "构建执行进程指令: ${command.joinToString(" ")}")
-
                 val pb = ProcessBuilder(command)
                 pb.environment()["HOME"] = filesDir.absolutePath
-                pb.environment()["GODEBUG"] = "netdns=go" // 强行指定 Go 使用内置的 netgo 解析器
                 
-                // 终极设计：通过环境变量直接向内核内嵌的 DNS 服务器中灌入优选 IP，实现绝对稳定、零文件残留的极速加速
+                // 终极绝杀：强行注入 LD_PRELOAD 底层系统劫持
+                pb.environment()["LD_PRELOAD"] = hijackSO.absolutePath
+                
                 if (usePreferredIp && preferredIp.isNotEmpty()) {
                     pb.environment()["PREFERRED_IP"] = preferredIp
-                    LogManager.addLog("Service", "🚀 [代码级 DNS 劫持已启用]：已将 Cloudflare 广域域名强制指向优选 IP: $preferredIp")
+                    LogManager.addLog("Service", "🚀 [C语言底层强拦截已载入]：所有的系统级 DNS 请求将被强制物理弯折至 53533 端口！")
                 } else {
                     pb.environment()["PREFERRED_IP"] = ""
                 }
@@ -134,7 +132,6 @@ class TunnelService : Service() {
                 LogManager.addLog("Service", "正在拉起 ProcessBuilder 执行底层二进制进程...")
                 val proc = pb.start()
                 process = proc
-                LogManager.addLog("Service", "成功拉起二进制内核进程，PID = ${getProcessId(proc)}")
 
                 val reader = BufferedReader(InputStreamReader(proc.inputStream))
                 var line: String?
@@ -189,29 +186,17 @@ class TunnelService : Service() {
         try {
             process?.destroy()
             process = null
-            LogManager.addLog("Service", "已向内核进程发送销毁信号 (SIGKILL/destroy)")
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        } catch (e: Exception) {}
     }
 
     override fun onDestroy() {
-        LogManager.addLog("Service", "onDestroy()：后台保活服务生命周期结束，正在执行资源回收...")
         stopTunnelProcess()
         FileServer.stop()
         
         try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-                LogManager.addLog("Service", "🔓 已安全释放 CPU 唤醒锁 (WakeLock)")
-            }
-            if (wifiLock?.isHeld == true) {
-                wifiLock?.release()
-                LogManager.addLog("Service", "🔓 已安全释放 Wi-Fi 高性能锁 (WifiLock)")
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (e: Exception) {}
 
         TunnelManager.stopTunnel()
         super.onDestroy()
