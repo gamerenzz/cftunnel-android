@@ -68,13 +68,16 @@ class TunnelService : Service() {
         val allowUpload = intent?.getBooleanExtra("allow_upload", false) ?: false
         val useAuth = intent?.getBooleanExtra("use_auth", false) ?: false
         val authPassword = intent?.getStringExtra("auth_password") ?: ""
-        
-        // 适配点 A：接收来自 UI 端的协议选择模式 (0 = quic, 1 = http2)
         val protocolMode = intent?.getIntExtra("protocol_mode", 0) ?: 0
+        
+        // 接收来自 UI 的优选 IP 策略
+        val usePreferredIp = intent?.getBooleanExtra("use_preferred_ip", false) ?: false
+        val preferredIp = intent?.getStringExtra("preferred_ip") ?: ""
 
         stopTunnelProcess()
         TunnelManager.startTunnel()
 
+        // 1. 动态写入 DNS resolv.conf
         val resolvFile = File("/data/data/com.qingchen.cftunnel/files/resolv.conf")
         try {
             resolvFile.parentFile?.mkdirs()
@@ -84,9 +87,32 @@ class TunnelService : Service() {
                 "nameserver 8.8.8.8\n" +
                 "nameserver 1.1.1.1\n"
             )
-            LogManager.addLog("Service", "本地 DNS 配置文件 resolv.conf 已成功写入物理路径: ${resolvFile.absolutePath}")
+            LogManager.addLog("Service", "本地 DNS 配置文件 resolv.conf 已成功写入物理路径")
         } catch (e: Exception) {
             LogManager.addLog("Service_Error", "写入 resolv.conf 配置文件失败: ${e.message}")
+        }
+
+        // 2. 核心补位：动态写入/清理我们劫持后的 Hosts 静态文件 (用于 Cloudflare 优选 IP 强行指流)
+        val hostsFile = File("/data/data/com.qingchen.cftunnel/files/hosts")
+        if (usePreferredIp && preferredIp.isNotEmpty()) {
+            try {
+                hostsFile.parentFile?.mkdirs()
+                hostsFile.writeText(
+                    "$preferredIp api.trycloudflare.com\n" +
+                    "$preferredIp region1.v2.argotunnel.com\n" +
+                    "$preferredIp region2.v2.argotunnel.com\n" +
+                    "$preferredIp api.cloudflare.com\n"
+                )
+                LogManager.addLog("Service", "🚀 [优选 IP 启用成功]：已在 hosts 中强制将 Cloudflare 广域域名指流至: $preferredIp")
+            } catch (e: Exception) {
+                LogManager.addLog("Service_Error", "写入 hosts 优选规则失败: ${e.message}")
+            }
+        } else {
+            // 如果用户关闭，强行删除该物理映射文件，使内核自动无缝回退到标准公共 DNS 解析
+            if (hostsFile.exists()) {
+                hostsFile.delete()
+                LogManager.addLog("Service", "已关闭优选 IP 加速，已安全删除本地 hosts 缓存规则")
+            }
         }
 
         if (mode == 0 && useFileServer && sharePath.isNotEmpty()) {
@@ -120,7 +146,6 @@ class TunnelService : Service() {
                     lastLogs.add("授权执行失败: ${e.message}")
                 }
 
-                // 适配点 B：动态将用户指定的协议选项转化为 cloudflared 的命令行参数，在起进程时注入
                 val protocolStr = if (protocolMode == 1) "http2" else "quic"
 
                 val command = if (mode == 0) {
@@ -147,7 +172,7 @@ class TunnelService : Service() {
                 
                 while (reader.readLine().also { line = it } != null) {
                     val logLine = line ?: break
-                    LogManager.addLog("Kernel", logLine)
+                    android.util.Log.d("cftunnel_kernel", logLine)
 
                     if (lastLogs.size >= 5) {
                         lastLogs.removeAt(0)
