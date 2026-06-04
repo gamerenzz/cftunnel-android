@@ -38,22 +38,34 @@ jobs:
         grep -rn "com.qingchen.cftunnel" $GOROOT/src/net/
         echo "=============================="
 
-    # 3. 编译并生成（强锁 CGO_ENABLED=0 静态编译，并开启 -a 重构）
-    - name: Compile cloudflared for Android ARM64
+    # 3. 编译并生成适用于 Android 的 libcloudflared.so (NDK 链增量编译，绝不使用 -a)
+    - name: Compile cloudflared for Android ARM64 with CGO
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         cd cloudflared-src
         
-        export CGO_ENABLED=0
+        NDK_PATH=$ANDROID_NDK_LATEST_HOME
+        echo "Using Android NDK Path: $NDK_PATH"
+        
+        CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android26-clang" | head -n 1)
+        if [ -z "$CLANG_PATH" ]; then
+          CLANG_PATH=$(find $NDK_PATH -name "aarch64-linux-android*-clang" | head -n 1)
+        fi
+        
+        echo "Using Cross Compiler CC: $CLANG_PATH"
+        
+        export CC=$CLANG_PATH
+        export CGO_ENABLED=1
         export GOOS=android
         export GOARCH=arm64
         
-        echo "Starting pure Go forced complete rebuild (go build -a) for Android ARM64..."
-        go build -a -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
+        # 彻底移除极其危险的 -a 参数！依靠 Go 的增量构建机制自动且安全地仅重构 net 网络库，其余底层库维持官方绝对兼容状态
+        echo "Starting CGO incremental compilation for Android ARM64..."
+        go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
-        echo "Pure Go static Compilation completed. File size details:"
+        echo "CGO Incremental Compilation completed. File size details:"
         ls -lh app/src/main/jniLibs/arm64-v8a/libcloudflared.so
 
     # 4. 配置 Java 运行环境
