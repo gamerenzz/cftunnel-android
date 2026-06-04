@@ -76,11 +76,11 @@ class TunnelService : Service() {
         stopTunnelProcess()
         TunnelManager.startTunnel()
 
+        // 1. 写入 DNS 配置文件 resolv.conf (供底层的 netgo 使用)
         val resolvFile = File("/data/data/com.qingchen.cftunnel/files/resolv.conf")
         try {
             resolvFile.parentFile?.mkdirs()
             resolvFile.writeText(
-                "nameserver 114.114.114.114\n" +
                 "nameserver 223.5.5.5\n" +
                 "nameserver 8.8.8.8\n" +
                 "nameserver 1.1.1.1\n"
@@ -88,6 +88,32 @@ class TunnelService : Service() {
             LogManager.addLog("Service", "本地 DNS 配置文件 resolv.conf 已成功写入物理路径")
         } catch (e: Exception) {
             LogManager.addLog("Service_Error", "写入 resolv.conf 配置文件失败: ${e.message}")
+        }
+
+        // 2. 写入 优选 IP hosts 映射文件 (强制底层的 netgo 优先读取 hosts 规则)
+        val hostsFile = File("/data/data/com.qingchen.cftunnel/files/hosts")
+        if (usePreferredIp && preferredIp.isNotEmpty()) {
+            try {
+                hostsFile.parentFile?.mkdirs()
+                hostsFile.writeText(
+                    "$preferredIp api.trycloudflare.com\n" +
+                    "$preferredIp region1.v2.argotunnel.com\n" +
+                    "$preferredIp region2.v2.argotunnel.com\n" +
+                    "$preferredIp api.cloudflare.com\n"
+                )
+                LogManager.addLog("Service", "🚀 [代码级 hosts 劫持已启用]：已将 Cloudflare 广域域名强制指向优选 IP: $preferredIp")
+            } catch (e: Exception) {
+                LogManager.addLog("Service_Error", "写入 hosts 优选规则失败: ${e.message}")
+            }
+        } else {
+            // 如果用户在界面关闭了优选 IP，写入默认的 hosts 规则进行重置，防止加载上一次的残留缓存
+            try {
+                hostsFile.parentFile?.mkdirs()
+                hostsFile.writeText("127.0.0.1 localhost\n::1 localhost\n")
+                LogManager.addLog("Service", "已关闭优选 IP 加速，已恢复默认本地 hosts 规则")
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
 
         if (mode == 0 && useFileServer && sharePath.isNotEmpty()) {
@@ -133,14 +159,7 @@ class TunnelService : Service() {
 
                 val pb = ProcessBuilder(command)
                 pb.environment()["HOME"] = filesDir.absolutePath
-                pb.environment()["GODEBUG"] = "netdns=go"
-                
-                if (usePreferredIp && preferredIp.isNotEmpty()) {
-                    pb.environment()["PREFERRED_IP"] = preferredIp
-                    LogManager.addLog("Service", "🚀 [代码级 DNS 拦截已载入]：已通过环境变量将广域域名强指优选 IP: $preferredIp")
-                } else {
-                    pb.environment()["PREFERRED_IP"] = ""
-                }
+                pb.environment()["GODEBUG"] = "netdns=go" // 强行指定 Go 使用内置的 netgo 解析器
                 
                 pb.redirectErrorStream(true)
 
@@ -156,7 +175,6 @@ class TunnelService : Service() {
                     val logLine = line ?: break
                     android.util.Log.d("cftunnel_kernel", logLine)
 
-                    // 核心修正点：修复了上一版写错的 break 逻辑。将其修改为标准队列先进先出，保障 While 循环长效运行不中断！
                     if (lastLogs.size >= 5) {
                         lastLogs.removeAt(0)
                     }
