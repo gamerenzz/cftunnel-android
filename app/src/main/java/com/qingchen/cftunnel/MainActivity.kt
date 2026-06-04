@@ -43,14 +43,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
-import java.net.InetSocketAddress
-import java.net.Socket
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -142,28 +136,12 @@ fun getPathFromUri(context: Context, uri: Uri): String? {
     }
 }
 
-// 异步 TCP 端口三次握手极速测速算法
-suspend fun measureTcpPing(ip: String, port: Int = 443, timeoutMs: Int = 1000): Long {
-    return withContext(Dispatchers.IO) {
-        val start = System.currentTimeMillis()
-        val socket = Socket()
-        try {
-            socket.connect(InetSocketAddress(ip, port), timeoutMs)
-            val latency = System.currentTimeMillis() - start
-            socket.close()
-            latency
-        } catch (e: Exception) {
-            -1L // 代表连接超时或失败
-        }
-    }
-}
-
 @Composable
 fun TunnelDashboard() {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
     val sharedPrefs = remember { context.getSharedPreferences("cftunnel_prefs", Context.MODE_PRIVATE) }
-    val coroutineScope = rememberCoroutineScope()
+    val scope = rememberCoroutineScope()
 
     var isSettingPage by remember { mutableStateOf(false) }
 
@@ -180,17 +158,20 @@ fun TunnelDashboard() {
     var protocolMode by remember { mutableStateOf(sharedPrefs.getInt("protocol_mode", 0)) }
     var isDebugMode by remember { mutableStateOf(sharedPrefs.getBoolean("is_debug_mode", false)) }
 
+    // 优选 IP 配置状态
     var usePreferredIp by remember { mutableStateOf(sharedPrefs.getBoolean("use_preferred_ip", false)) }
-    var preferredIpMode by remember { mutableStateOf(sharedPrefs.getInt("preferred_ip_mode", 0)) }
+    var preferredIpMode by remember { mutableStateOf(sharedPrefs.getInt("preferred_ip_mode", 0)) } // 0 = 自动, 1 = 移动, 2 = 电信, 3 = 均衡, 4 = 自定义
     var customPreferredIp by remember { mutableStateOf(sharedPrefs.getString("custom_preferred_ip", "") ?: "") }
 
-    // 新增：测速状态变量
+    // 新增：自动测速出的最快 IP 与当前 RTT 测速板状态
+    var bestDetectedIp by remember { mutableStateOf(sharedPrefs.getString("best_detected_ip", "") ?: "") }
     var isTestingSpeed by remember { mutableStateOf(false) }
-    var speedTestResults by remember { mutableStateOf<List<Pair<String, Long>>>(emptyList()) }
+    var testResults by remember { mutableStateOf<List<CFEdgeSpeedTest.TestResult>>(emptyList()) }
 
     val isRunning by TunnelManager.isRunning.collectAsState()
     val generatedUrl by TunnelManager.tunnelUrl.collectAsState()
     val statusText by TunnelManager.statusText.collectAsState()
+    
     val logs by LogManager.logs.collectAsState()
     var showLogs by remember { mutableStateOf(true) } 
     val lazyListState = rememberLazyListState()
@@ -208,15 +189,20 @@ fun TunnelDashboard() {
     LaunchedEffect(usePreferredIp) { sharedPrefs.edit().putBoolean("use_preferred_ip", usePreferredIp).apply() }
     LaunchedEffect(preferredIpMode) { sharedPrefs.edit().putInt("preferred_ip_mode", preferredIpMode).apply() }
     LaunchedEffect(customPreferredIp) { sharedPrefs.edit().putString("custom_preferred_ip", customPreferredIp).apply() }
+    
+    // 持久化保存测算出的最快 IP
+    LaunchedEffect(bestDetectedIp) { sharedPrefs.edit().putString("best_detected_ip", bestDetectedIp).apply() }
 
-    val activePreferredIp = remember(usePreferredIp, preferredIpMode, customPreferredIp) {
+    // 优选 IP 自适应终极映射：根据用户档位，返回物理 IP（如果是 0 自动测速，直接返回测速好的最佳 IP，如果没有测速则默认均衡 IP 兜底）
+    val activePreferredIp = remember(usePreferredIp, preferredIpMode, customPreferredIp, bestDetectedIp) {
         if (!usePreferredIp) ""
         else {
             when (preferredIpMode) {
-                0 -> "104.16.123.96" 
-                1 -> "104.18.2.85"  
-                2 -> "104.20.123.96" 
-                else -> customPreferredIp.trim() 
+                0 -> if (bestDetectedIp.isNotEmpty()) bestDetectedIp else "104.20.123.96" // 自动测速
+                1 -> "104.16.123.96" // 移动/联通
+                2 -> "104.18.2.85"  // 电信
+                3 -> "104.20.123.96" // 均衡
+                else -> customPreferredIp.trim()
             }
         }
     }
@@ -402,6 +388,11 @@ fun TunnelDashboard() {
                             return@Button
                         }
                         
+                        // 防呆机制：如果勾选了自动测速但此前从未运行过测速，给出友情弹窗，并自动回退到均衡 IP 启动
+                        if (usePreferredIp && preferredIpMode == 0 && bestDetectedIp.isEmpty()) {
+                            Toast.makeText(context, "友情提示：您还未执行过全网测速，系统已自动选用均衡 IP 启动，推荐您之后在高级设置里测速一次。", Toast.LENGTH_LONG).show()
+                        }
+
                         serviceIntent.putExtra("mode", selectedTab)
                         serviceIntent.putExtra("port", portText)
                         serviceIntent.putExtra("token", tokenText)
@@ -638,6 +629,7 @@ fun TunnelDashboard() {
                                 val color = when {
                                     logLine.contains("[Kernel]") -> Color(0xFF34D399)
                                     logLine.contains("Error") || logLine.contains("失败") || logLine.contains("退出") || logLine.contains("ERR") || logLine.contains("FAIL") -> Color(0xFFF87171)
+                                    logLine.contains("WRN") || logLine.contains("WARNING") -> Color(0xFFF59E0B)
                                     else -> Color(0xFF9CA3AF)
                                 }
                                 Text(
@@ -806,11 +798,11 @@ fun TunnelDashboard() {
                             onValueChange = { sharePath = it },
                             modifier = Modifier.fillMaxWidth(),
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = Color(0xFF3B82F6),
-                                unfocusedBorderColor = Color(0xFF2A2A3A),
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White
-                            ),
+                                    focusedBorderColor = Color(0xFF3B82F6),
+                                    unfocusedBorderColor = Color(0xFF2A2A3A),
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
+                                ),
                             placeholder = { Text("多个路径，如: /path/A;/path/B", color = Color(0xFF8888A0)) }
                         )
 
@@ -858,7 +850,7 @@ fun TunnelDashboard() {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // --- 新增：Cloudflare 优选 IP 加速与高并发极速测速卡片（极简响应式设计） ---
+            // --- 🚀 优选 IP 手动测速及结果显示控制板（加入实时进度回显、按钮高亮和转圈加载动效） ---
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
@@ -892,126 +884,8 @@ fun TunnelDashboard() {
 
                     if (usePreferredIp) {
                         Spacer(modifier = Modifier.height(12.dp))
-                        
-                        // 多路高并发 TCP 端口测速按钮
-                        Button(
-                            onClick = {
-                                coroutineScope.launch {
-                                    isTestingSpeed = true
-                                    LogManager.addLog("UI", "用户触发了 [多路并发极速测速]...")
-                                    
-                                    // 预设高可靠三网优选 IP 测速池
-                                    val ipPool = listOf(
-                                        "104.16.123.96", // 移动/联通黄金推荐
-                                        "104.18.2.85",  // 电信 163 推荐
-                                        "104.20.123.96", // 三网通用 Anycast
-                                        "104.16.124.96", // 移动备用
-                                        "104.18.3.85",  // 电信备用
-                                        "162.159.211.4" // 公共/CF 节点
-                                    )
-
-                                    // 使用协程并发 async 执行 443 端口三次握手测速
-                                    val jobs = ipPool.map { ip ->
-                                        async {
-                                            val latency = measureTcpPing(ip)
-                                            Pair(ip, latency)
-                                        }
-                                    }
-                                    
-                                    val results = jobs.awaitAll()
-                                    // 过滤掉超时的 (-1)，按延迟升序排列
-                                    val sortedResults = results.filter { it.second > 0 }.sortedBy { it.second }
-                                    speedTestResults = sortedResults
-                                    isTestingSpeed = false
-
-                                    if (sortedResults.isNotEmpty()) {
-                                        val bestIp = sortedResults[0].first
-                                        customPreferredIp = bestIp
-                                        preferredIpMode = 3 // 自动切换为“自定义手动输入”并锁定应用该 IP
-                                        LogManager.addLog("UI", "⏱️ 极速测速成功！已自动锁定最优 Anycast 节点: $bestIp (${sortedResults[0].second}ms)")
-                                        Toast.makeText(context, "测速成功！已自动应用最优节点: $bestIp (${sortedResults[0].second}ms)", Toast.LENGTH_LONG).show()
-                                    } else {
-                                        LogManager.addLog("UI_Error", "⏱️ 测速失败：所有节点均响应超时，请检查您的移动网络。")
-                                        Toast.makeText(context, "所有优选节点均超时，请检查网络", Toast.LENGTH_LONG).show()
-                                    }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2A2A3A)),
-                            shape = RoundedCornerShape(8.dp),
-                            enabled = !isTestingSpeed
-                        ) {
-                            Text(
-                                text = if (isTestingSpeed) "⏱️ 正在全网高并发测速中..." else "⏱️ 开始多路并发极速测速",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            )
-                        }
-
-                        if (isTestingSpeed) {
-                            Spacer(modifier = Modifier.height(10.dp))
-                            LinearProgressIndicator(
-                                modifier = Modifier.fillMaxWidth(),
-                                color = Color(0xFF3B82F6),
-                                trackColor = Color(0xFF1F1F2E)
-                            )
-                        }
-
-                        // 展示高档次测速结果列表
-                        if (speedTestResults.isNotEmpty() && !isTestingSpeed) {
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = "测速结果排行:",
-                                color = Color(0xFF8888A0),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                speedTestResults.take(3).forEachIndexed { index, pair ->
-                                    val isBest = index == 0
-                                    val tag = when (pair.first) {
-                                        "104.16.123.96" -> "移动/联通 推荐"
-                                        "104.18.2.85" -> "中国电信 推荐"
-                                        "104.20.123.96" -> "三网通用 Anycast"
-                                        else -> "备用节点"
-                                    }
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .background(Color(0xFF0F0F14), RoundedCornerShape(6.dp))
-                                            .padding(10.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(6.dp)
-                                                    .background(if (isBest) Color(0xFF22C55E) else Color(0xFFF59E0B), RoundedCornerShape(50))
-                                            )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Text(
-                                                text = "${pair.first} ($tag)",
-                                                color = Color.White,
-                                                fontSize = 12.sp
-                                            )
-                                        }
-                                        Text(
-                                            text = "${pair.second}ms ${if(isBest) "🟢 极速" else ""}",
-                                            color = if (isBest) Color(0xFF22C55E) else Color(0xFF8888A0),
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(14.dp))
                         Text(
-                            text = "选择优选档位",
+                            text = "选择推荐优选档位",
                             color = Color(0xFFE4E4EF),
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -1019,6 +893,7 @@ fun TunnelDashboard() {
                         )
                         
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            // 0: 自动测速
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1029,7 +904,14 @@ fun TunnelDashboard() {
                             ) {
                                 RadioButton(selected = preferredIpMode == 0, onClick = { preferredIpMode = 0 })
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("移动 / 联通 推荐 (104.16.123.96 - 香港直连)", color = Color.White, fontSize = 12.sp)
+                                Column {
+                                    Text("自动测速选择 (推荐最速延迟)", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    if (bestDetectedIp.isNotEmpty()) {
+                                        Text("当前自动选用的最快 IP: $bestDetectedIp", color = Color(0xFF22C55E), fontSize = 11.sp)
+                                    } else {
+                                        Text("暂无测速记录，请在下方点击 [开始全网测速]", color = Color(0xFFEF4444), fontSize = 11.sp)
+                                    }
+                                }
                             }
 
                             Row(
@@ -1042,7 +924,7 @@ fun TunnelDashboard() {
                             ) {
                                 RadioButton(selected = preferredIpMode == 1, onClick = { preferredIpMode = 1 })
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("中国电信 推荐 (104.18.2.85 - 骨干直连)", color = Color.White, fontSize = 12.sp)
+                                Text("移动 / 联通 推荐 (104.16.123.96 - 香港直连)", color = Color.White, fontSize = 12.sp)
                             }
 
                             Row(
@@ -1055,7 +937,7 @@ fun TunnelDashboard() {
                             ) {
                                 RadioButton(selected = preferredIpMode == 2, onClick = { preferredIpMode = 2 })
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("三网均衡 智能 Anycast (104.20.123.96)", color = Color.White, fontSize = 12.sp)
+                                Text("中国电信 推荐 (104.18.2.85 - 骨干直连)", color = Color.White, fontSize = 12.sp)
                             }
 
                             Row(
@@ -1068,14 +950,27 @@ fun TunnelDashboard() {
                             ) {
                                 RadioButton(selected = preferredIpMode == 3, onClick = { preferredIpMode = 3 })
                                 Spacer(modifier = Modifier.width(8.dp))
+                                Text("三网均衡 智能 Anycast (104.20.123.96)", color = Color.White, fontSize = 12.sp)
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { preferredIpMode = 4 }
+                                    .background(if (preferredIpMode == 4) Color(0xFF2A2A3A) else Color.Transparent, RoundedCornerShape(6.dp))
+                                    .padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(selected = preferredIpMode == 4, onClick = { preferredIpMode = 4 })
+                                Spacer(modifier = Modifier.width(8.dp))
                                 Text("✍️ 自定义手动输入优选 IP", color = Color.White, fontSize = 12.sp)
                             }
                         }
 
-                        if (preferredIpMode == 3) {
+                        if (preferredIpMode == 4) {
                             Spacer(modifier = Modifier.height(10.dp))
                             Text(
-                                text = "当前锁定/应用优选 IP",
+                                text = "手动输入优选 IP",
                                 color = Color(0xFFE4E4EF),
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
@@ -1094,6 +989,75 @@ fun TunnelDashboard() {
                                 placeholder = { Text("请输入例如 104.16.124.96", color = Color(0xFF8888A0)) },
                                 singleLine = true
                             )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // 开始测速按钮和加载动效
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    isTestingSpeed = true
+                                    LogManager.addLog("UI", "用户触发了[开始全网测速]指令")
+                                    val best = CFEdgeSpeedTest.runSpeedTest { progress ->
+                                        testResults = progress
+                                    }
+                                    if (best != null) {
+                                        bestDetectedIp = best
+                                        Toast.makeText(context, "全网测速成功！最快节点为: $best", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "测速失败，请检查手机网络状况", Toast.LENGTH_SHORT).show()
+                                    }
+                                    isTestingSpeed = false
+                                }
+                            },
+                            enabled = !isTestingSpeed,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B82F6)),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            if (isTestingSpeed) {
+                                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("正在并发测速中...", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            } else {
+                                Text("⚡ 开始全网测速并应用", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
+                        }
+
+                        // 并发测速结果实时刷新显示板
+                        if (testResults.isNotEmpty() || isTestingSpeed) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0F0F14)),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text("实时测速面板 (RTT 7844 端口)", color = Color(0xFF8888A0), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    testResults.forEach { res ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(res.ip, color = Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                            if (res.rtt != null) {
+                                                val isBest = res.ip == bestDetectedIp
+                                                Text(
+                                                    text = "${res.rtt}ms ${if (isBest) " [最优]" else ""}",
+                                                    color = if (isBest) Color(0xFF22C55E) else Color(0xFF60A5FA),
+                                                    fontSize = 11.sp,
+                                                    fontWeight = if (isBest) FontWeight.Bold else FontWeight.Normal
+                                                )
+                                            } else {
+                                                Text("正在连接/超时...", color = Color(0xFFEF4444), fontSize = 11.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1115,7 +1079,7 @@ fun TunnelDashboard() {
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "穿穿透传输协议",
+                            text = "穿透传输协议",
                             color = Color.White,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold
