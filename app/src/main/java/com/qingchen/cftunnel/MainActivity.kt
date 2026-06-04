@@ -141,10 +141,8 @@ fun TunnelDashboard() {
     val clipboardManager = LocalClipboardManager.current
     val sharedPrefs = remember { context.getSharedPreferences("cftunnel_prefs", Context.MODE_PRIVATE) }
 
-    // 双屏切换导航状态：false = 主控制面板, true = 高级设置页面
     var isSettingPage by remember { mutableStateOf(false) }
 
-    // 核心运行与配置状态
     var selectedTab by remember { mutableStateOf(0) }
     var portText by remember { mutableStateOf(sharedPrefs.getString("local_port", "8181") ?: "8181") }
     var tokenText by remember { mutableStateOf(sharedPrefs.getString("tunnel_token", "") ?: "") }
@@ -156,9 +154,12 @@ fun TunnelDashboard() {
     var useAuth by remember { mutableStateOf(sharedPrefs.getBoolean("use_auth", false)) }
     var authPassword by remember { mutableStateOf(sharedPrefs.getString("auth_password", "") ?: "") }
     var protocolMode by remember { mutableStateOf(sharedPrefs.getInt("protocol_mode", 0)) }
-
-    // 新增：详细调试日志模式状态持久化（默认关闭，只显示核心/警告日志）
     var isDebugMode by remember { mutableStateOf(sharedPrefs.getBoolean("is_debug_mode", false)) }
+
+    // 新增：优选 IP 安全控制状态与持久化数据 (0 = 移动/联通, 1 = 电信, 2 = 均衡, 3 = 自定义)
+    var usePreferredIp by remember { mutableStateOf(sharedPrefs.getBoolean("use_preferred_ip", false)) }
+    var preferredIpMode by remember { mutableStateOf(sharedPrefs.getInt("preferred_ip_mode", 0)) }
+    var customPreferredIp by remember { mutableStateOf(sharedPrefs.getString("custom_preferred_ip", "") ?: "") }
 
     val isRunning by TunnelManager.isRunning.collectAsState()
     val generatedUrl by TunnelManager.tunnelUrl.collectAsState()
@@ -178,22 +179,36 @@ fun TunnelDashboard() {
     LaunchedEffect(authPassword) { sharedPrefs.edit().putString("auth_password", authPassword).apply() }
     LaunchedEffect(protocolMode) { sharedPrefs.edit().putInt("protocol_mode", protocolMode).apply() }
     LaunchedEffect(isDebugMode) { sharedPrefs.edit().putBoolean("is_debug_mode", isDebugMode).apply() }
+    
+    // 自适应优选 IP 数据持久化
+    LaunchedEffect(usePreferredIp) { sharedPrefs.edit().putBoolean("use_preferred_ip", usePreferredIp).apply() }
+    LaunchedEffect(preferredIpMode) { sharedPrefs.edit().putInt("preferred_ip_mode", preferredIpMode).apply() }
+    LaunchedEffect(customPreferredIp) { sharedPrefs.edit().putString("custom_preferred_ip", customPreferredIp).apply() }
 
-    // 智能日志自适应流式过滤器
+    // 优选 IP 解析器：将档位自动映射为物理 IP
+    val activePreferredIp = remember(usePreferredIp, preferredIpMode, customPreferredIp) {
+        if (!usePreferredIp) ""
+        else {
+            when (preferredIpMode) {
+                0 -> "104.16.123.96" // 移动/联通
+                1 -> "104.18.2.85"  // 电信
+                2 -> "104.20.123.96" // 均衡
+                else -> customPreferredIp.trim() // 用户自定义
+            }
+        }
+    }
+
     val filteredLogs = remember(logs, isDebugMode) {
         if (isDebugMode) {
-            logs // 开启调试模式，输出 100% 全量原始日志
+            logs 
         } else {
             logs.filter { line ->
-                // 1. 保留所有 APP、服务和文件服务器的原生中文日志
                 if (line.contains("[UI]") || line.contains("[Service]") || 
                     line.contains("[System]") || line.contains("[FileServer]") || 
                     line.contains("[UI_Error]") || line.contains("[Service_Error]") || 
                     line.contains("[FileServer_Error]")) {
                     true
-                } 
-                // 2. 针对冗长的 Go 内核日志，仅精确拦截警告、报错、链接分配及握手成功标志
-                else if (line.contains("[Kernel]")) {
+                } else if (line.contains("[Kernel]")) {
                     line.contains("ERR") || line.contains("WRN") || 
                     line.contains("WARNING") || line.contains("failed") || 
                     line.contains("Failed") || line.contains("trycloudflare.com") || 
@@ -248,7 +263,7 @@ fun TunnelDashboard() {
         
         if (!isSettingPage) {
             // ==========================================
-            // 📲 1. 主控制面板界面 (Dashboard)
+            // 📲 1. 主控制面板 (Dashboard)
             // ==========================================
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
@@ -262,7 +277,6 @@ fun TunnelDashboard() {
                     fontWeight = FontWeight.Bold
                 )
                 
-                // 设置齿轮按钮，点击滑入高级设置屏
                 Text(
                     text = "⚙️ 高级设置",
                     color = Color(0xFF60A5FA),
@@ -298,7 +312,6 @@ fun TunnelDashboard() {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 极简参数配置卡片
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
@@ -357,7 +370,6 @@ fun TunnelDashboard() {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 核心运行/停止按钮
             Button(
                 onClick = {
                     val serviceIntent = Intent(context, TunnelService::class.java)
@@ -376,6 +388,10 @@ fun TunnelDashboard() {
                         serviceIntent.putExtra("use_auth", useAuth && selectedTab == 0)
                         serviceIntent.putExtra("auth_password", authPassword)
                         serviceIntent.putExtra("protocol_mode", protocolMode)
+                        
+                        // 关联点：将优选 IP 标志及物理 IP 分流传给服务端
+                        serviceIntent.putExtra("use_preferred_ip", usePreferredIp)
+                        serviceIntent.putExtra("preferred_ip", activePreferredIp)
 
                         LogManager.addLog("UI", "用户点击了[启动隧道]按钮，端口: $portText，共享上传: $allowUpload，开启密码: $useAuth")
 
@@ -389,7 +405,7 @@ fun TunnelDashboard() {
                             e.printStackTrace()
                             LogManager.addLog("UI_Error", "启动服务底层抛出异常: ${e.message}")
                             Toast.makeText(context, "启动服务受阻: ${e.message}", Toast.LENGTH_LONG).show()
-                            TunnelManager.startTunnel("系统拦截启动...")
+                            TunnelManager.startTunnel("荣耀系统拦截了后台启动...")
                             TunnelManager.updateStatus("启动受阻，错误: ${e.message}")
                             TunnelManager.stopTunnel()
                         }
@@ -418,7 +434,6 @@ fun TunnelDashboard() {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 状态卡片（启动时自动显示丰富的参数配置回显）
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
@@ -478,6 +493,14 @@ fun TunnelDashboard() {
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
+                        // 新增：主控制面板中，实时回显当前隧道是否在走优选 IP 加速
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "🚀 优选 IP 加速状态:  ${if(usePreferredIp && activePreferredIp.isNotEmpty()) "已启用 ($activePreferredIp)" else "未启用 (默认 DNS)"}",
+                            color = if(usePreferredIp) Color(0xFF22C55E) else Color(0xFFEF4444),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
 
                     if (isRunning && selectedTab == 0 && generatedUrl.isNotEmpty()) {
@@ -519,7 +542,6 @@ fun TunnelDashboard() {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 调试控制台日志（已应用智能过滤机制，点击标题右侧按钮一键秒复制、清空、折叠）
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
@@ -549,7 +571,6 @@ fun TunnelDashboard() {
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier
                                     .clickable {
-                                        // 复制机制安全升级：即使默认日志已被智能过滤精简，复制时依然全量复制 100% 原生日志，保障排查细节无损！
                                         val allLogs = LogManager.getAllLogsString()
                                         if (allLogs.isNotEmpty()) {
                                             clipboardManager.setText(AnnotatedString(allLogs))
@@ -648,7 +669,6 @@ fun TunnelDashboard() {
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    // 文件服务器共享开关
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -677,7 +697,6 @@ fun TunnelDashboard() {
                     if (useFileServer) {
                         Spacer(modifier = Modifier.height(14.dp))
                         
-                        // 允许上传开关
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -705,7 +724,6 @@ fun TunnelDashboard() {
 
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        // 密码验证开关
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -769,11 +787,11 @@ fun TunnelDashboard() {
                             onValueChange = { sharePath = it },
                             modifier = Modifier.fillMaxWidth(),
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = Color(0xFF3B82F6),
-                                unfocusedBorderColor = Color(0xFF2A2A3A),
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White
-                            ),
+                                    focusedBorderColor = Color(0xFF3B82F6),
+                                    unfocusedBorderColor = Color(0xFF2A2A3A),
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
+                                ),
                             placeholder = { Text("多个路径，如: /path/A;/path/B", color = Color(0xFF8888A0)) }
                         )
 
@@ -821,7 +839,132 @@ fun TunnelDashboard() {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 协议选择设置（收纳进高级设置中，主面再无杂乱感）
+            // --- 新增：Cloudflare 优选 IP 加速卡片（支持移动/联通、电信、通用均衡和手动自定义 IP 输入） ---
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "🚀 启用优选 IP 链路加速",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "将 Cloudflare 穿透连接强指国内极速节点",
+                                color = Color(0xFF8888A0),
+                                fontSize = 11.sp
+                            )
+                        }
+                        Switch(
+                            checked = usePreferredIp,
+                            onCheckedChange = { usePreferredIp = it },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF3B82F6))
+                        )
+                    }
+
+                    if (usePreferredIp) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "选择推荐优选档位",
+                            color = Color(0xFFE4E4EF),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+                        
+                        // 优选挡位多选一布局
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { preferredIpMode = 0 }
+                                    .background(if (preferredIpMode == 0) Color(0xFF2A2A3A) else Color.Transparent, RoundedCornerShape(6.dp))
+                                    .padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(selected = preferredIpMode == 0, onClick = { preferredIpMode = 0 })
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("移动 / 联通 推荐 (104.16.123.96 - 香港直连)", color = Color.White, fontSize = 12.sp)
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { preferredIpMode = 1 }
+                                    .background(if (preferredIpMode == 1) Color(0xFF2A2A3A) else Color.Transparent, RoundedCornerShape(6.dp))
+                                    .padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(selected = preferredIpMode == 1, onClick = { preferredIpMode = 1 })
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("中国电信 推荐 (104.18.2.85 - 骨干直连)", color = Color.White, fontSize = 12.sp)
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { preferredIpMode = 2 }
+                                    .background(if (preferredIpMode == 2) Color(0xFF2A2A3A) else Color.Transparent, RoundedCornerShape(6.dp))
+                                    .padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(selected = preferredIpMode == 2, onClick = { preferredIpMode = 2 })
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("三网均衡 智能 Anycast (104.20.123.96)", color = Color.White, fontSize = 12.sp)
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { preferredIpMode = 3 }
+                                    .background(if (preferredIpMode == 3) Color(0xFF2A2A3A) else Color.Transparent, RoundedCornerShape(6.dp))
+                                    .padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(selected = preferredIpMode == 3, onClick = { preferredIpMode = 3 })
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("✍️ 自定义手动输入优选 IP", color = Color.White, fontSize = 12.sp)
+                            }
+                        }
+
+                        if (preferredIpMode == 3) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = "手动输入优选 IP",
+                                color = Color(0xFFE4E4EF),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(bottom = 6.dp)
+                            )
+                            OutlinedTextField(
+                                value = customPreferredIp,
+                                onValueChange = { customPreferredIp = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = Color(0xFF3B82F6),
+                                    unfocusedBorderColor = Color(0xFF2A2A3A),
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
+                                ),
+                                placeholder = { Text("请输入例如 104.16.124.96", color = Color(0xFF8888A0)) },
+                                singleLine = true
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
@@ -877,7 +1020,6 @@ fun TunnelDashboard() {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 新增：详细调试模式开关，控制日志卡片默认输出量
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
