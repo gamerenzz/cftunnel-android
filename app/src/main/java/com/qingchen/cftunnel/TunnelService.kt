@@ -68,8 +68,6 @@ class TunnelService : Service() {
         val allowUpload = intent?.getBooleanExtra("allow_upload", false) ?: false
         val useAuth = intent?.getBooleanExtra("use_auth", false) ?: false
         val authPassword = intent?.getStringExtra("auth_password") ?: ""
-        
-        // 适配点 A：接收来自 UI 端的协议选择模式 (0 = quic, 1 = http2)
         val protocolMode = intent?.getIntExtra("protocol_mode", 0) ?: 0
 
         stopTunnelProcess()
@@ -120,13 +118,13 @@ class TunnelService : Service() {
                     lastLogs.add("授权执行失败: ${e.message}")
                 }
 
-                // 适配点 B：动态将用户指定的协议选项转化为 cloudflared 的命令行参数，在起进程时注入
                 val protocolStr = if (protocolMode == 1) "http2" else "quic"
 
+                // 关键修复点：注入 "--edge-ip-version", "4" 参数。强行屏蔽不稳定的系统级 IPv6 握手通道，强制 100% 走优化最佳的 IPv4 连接
                 val command = if (mode == 0) {
-                    listOf(fileSO.absolutePath, "tunnel", "--protocol", protocolStr, "--url", "http://127.0.0.1:$port")
+                    listOf(fileSO.absolutePath, "tunnel", "--protocol", protocolStr, "--edge-ip-version", "4", "--url", "http://127.0.0.1:$port")
                 } else {
-                    listOf(fileSO.absolutePath, "tunnel", "--protocol", protocolStr, "run", "--token", token)
+                    listOf(fileSO.absolutePath, "tunnel", "--protocol", protocolStr, "--edge-ip-version", "4", "run", "--token", token)
                 }
 
                 LogManager.addLog("Service", "构建执行进程指令: ${command.joinToString(" ")}")
