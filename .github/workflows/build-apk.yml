@@ -1,7 +1,10 @@
 name: Build Android APK
 
 on:
-
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
@@ -12,20 +15,40 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # 1. 升级到最新的 Go 1.24，完美满足 cloudflared 最新的后量子密码学依赖需求
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24'
+        go-version: '1.22'
 
-    # 2. 编译并生成适用于 Android 的 libcloudflared.so (注入全局高阶 DNS 拦截服务端)
+    - name: Patch Go DNS Resolver Fallbacks for Android
+      run: |
+        GOROOT=$(go env GOROOT)
+        echo "Go Root found at: $GOROOT"
+        
+        sudo chown -R runner:runner $GOROOT
+        
+        find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"127.0.0.1:53"|"127.0.0.1:53533"|g' {} +
+        find $GOROOT/src/net/ -type f -name "*.go" -exec sed -i 's|"[::1]:53"|"127.0.0.1:53533"|g' {} +
+        
+        echo "===== 自动验证补丁注入状态 ====="
+        grep -rn "127.0.0.1:53533" $GOROOT/src/net/
+        echo "=============================="
+
+    - name: Force Rebuild Patched Go Net Package
+      run: |
+        export CGO_ENABLED=0
+        export GOOS=android
+        export GOARCH=arm64
+        
+        go install -a net
+        echo "Patched standard net package compiled and cached successfully!"
+
     - name: Compile cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
         git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 注入 Go 全局高阶 DNS 拦截服务器
-        # 只要此代码注入，Go 的所有网络解析都会被强制发往 127.0.0.1:53533，彻底无视安卓系统限制！
+        # 终极高阶 DNS 拦截服务端：全类型查询拦截与响应伪造
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
@@ -37,10 +60,8 @@ jobs:
         )
 
         func init() {
-            // 异步拉起本地极简拦截 DNS 服务
             go startLocalDNSServer()
 
-            // 重定向 net.DefaultResolver 到本地 53533 端口
             net.DefaultResolver = &net.Resolver{
                 PreferGo: true,
                 Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -69,27 +90,23 @@ jobs:
                 }
                 query := buf[:n]
 
-                // 解析请求的域名
                 domain := parseDNSQueryDomain(query)
                 preferredIP := os.Getenv("PREFERRED_IP")
 
-                // 核心重构：拦截核心流量域名到优选 IP
-                if preferredIP != "" && (strings.Contains(domain, "trycloudflare.com") || 
-                    strings.Contains(domain, "argotunnel.com") || 
-                    strings.Contains(domain, "cloudflare.com")) {
+                // 如果启用了优选 IP，且当前查询是 Cloudflare 穿透核心域名
+                if preferredIP != "" && strings.Contains(domain, "argotunnel.com") {
                     
                     qTypeOffset := n - 4
                     if qTypeOffset > 12 {
-                        qType := (uint16(query[qTypeOffset]) << 8) | uint16(query[qTypeOffset+1])
-                        if qType == 1 { // A 记录查询，强行伪造 DNS 响应体
-                            response := fakedDNSResponse(query, preferredIP)
-                            conn.WriteToUDP(response, clientAddr)
-                            continue
-                        }
+                        // 无论内核请求的是 A(1), AAAA(28), 还是 SRV(33)，我们统统拦截！
+                        // 强行向内核伪造并返回一个 A 记录响应包，把内核彻底锁死在我们的优选 IP 上！
+                        response := fakedDNSResponse(query, preferredIP)
+                        conn.WriteToUDP(response, clientAddr)
+                        continue
                     }
                 }
 
-                // 常规请求，统一、直接转发给公共 DNS (114.114.114.114:53)
+                // 常规请求或免域名注册请求，放行给 114
                 go forwardDNS(conn, clientAddr, query)
             }
         }
@@ -152,42 +169,63 @@ jobs:
             resp := make([]byte, len(query))
             copy(resp, query)
 
-            // 修改 Flags 为 DNS 响应成功标志 (0x8180)
+            // Flags: 响应成功 (0x8180)
             resp[2] = 0x81
             resp[3] = 0x80
-
-            // 修改 Answer RRs 数量为 1
+            // Answer RRs 数量
             resp[6] = 0x00
             resp[7] = 0x01
+            // Authority RRs = 0
+            resp[8] = 0x00
+            resp[9] = 0x00
+            // Additional RRs = 0
+            resp[10] = 0x00
+            resp[11] = 0x00
 
-            // 构造标准 A 记录 Answer 响应体
+            // 构造强硬的 A 记录 Answer
             answer := []byte{
-                0xc0, 0x0c,                 // 域名指针
+                0xc0, 0x0c,                 // 域名指针指向请求
                 0x00, 0x01,                 // Type: A
                 0x00, 0x01,                 // Class: IN
                 0x00, 0x00, 0x00, 0x3c,     // TTL: 60s
-                0x00, 0x04,                 // Length: 4 字节
-                ip[0], ip[1], ip[2], ip[3], // 优选 IP 的 4 字节数据
+                0x00, 0x04,                 // Length: 4 bytes
+                ip[0], ip[1], ip[2], ip[3], // 注入的优选 IP
             }
 
             return append(resp, answer...)
         }
         EOF
         
-        cd cloudflared-src
+        # 将 go.mod 降级与剥离工具链拦截
+        sed -i 's|^go 1\.[0-9]\+|go 1.22|g' cloudflared-src/go.mod
+        sed -i '/^toolchain/d' cloudflared-src/go.mod
         
-        # 启用 100% 极速静态纯 Go 编译，不需要任何降级、重构或 sudo 黑客手段
+        # 降级所有 vendor 依赖树
+        if [ -d "cloudflared-src/vendor" ]; then
+          echo "Found local vendor cache. Applying dependency downgrades..."
+          sed -i 's|go 1\.26|go 1.22|g' cloudflared-src/vendor/modules.txt
+          sed -i 's|go 1\.25|go 1.22|g' cloudflared-src/vendor/modules.txt
+          sed -i 's|go 1\.24|go 1.22|g' cloudflared-src/vendor/modules.txt
+          sed -i 's|go 1\.23|go 1.22|g' cloudflared-src/vendor/modules.txt
+          find cloudflared-src/vendor/ -name "go.mod" -exec sed -i 's|^go 1\.[0-9]\+|go 1.22|g' {} +
+        fi
+        
+        cd cloudflared-src
         export CGO_ENABLED=0
         export GOOS=android
         export GOARCH=arm64
         
-        echo "Starting pure Go static compilation for Android ARM64..."
+        export GOTOOLCHAIN=local
+        mkdir -p /tmp/go-clean-cache
+        export GOCACHE=/tmp/go-clean-cache
+        
+        echo "Starting pure Go static compilation with Clean-GOCACHE, Local-Toolchain and Dependency-Downgrade..."
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
         ls -lh app/src/main/jniLibs/arm64-v8a/libcloudflared.so
 
-    # 3. 配置 Java 运行环境
+    # 5. 配置 Java 运行环境
     - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
@@ -195,7 +233,7 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    # 4. 强制生成兼容的 Gradle 8.5 包装器并授予执行权限
+    # 6. 强制生成兼容的 Gradle 8.5 包装器并授予执行权限
     - name: Generate Gradle Wrapper
       run: |
         if [ ! -f "gradlew" ]; then
@@ -203,11 +241,11 @@ jobs:
         fi
         chmod +x gradlew
 
-    # 5. 执行打包命令
+    # 7. 执行打包命令
     - name: Build with Gradle
       run: ./gradlew assembleDebug
 
-    # 6. 将 APK 作为 Artifact 上传，供用户下载
+    # 8. 将 APK 作为 Artifact 上传，供用户下载
     - name: Upload Output APK
       uses: actions/upload-artifact@v4
       with:
