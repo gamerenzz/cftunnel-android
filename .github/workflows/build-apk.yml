@@ -12,47 +12,21 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # 1. 自动配置最新的 Go 1.24 编译环境
+    # 1. 自动配置最新的 Go 1.24 稳定编译环境
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: '1.24'
 
-    # 2. 核心特权劫持：将系统级 GOROOT 目录所有权赋予当前普通用户 runner，并在最底层的套接字拨号层强行将所有 DNS 连接导向 53533 端口
-    - name: Patch Go DNS Resolver Fallbacks for Android
-      run: |
-        GOROOT=$(go env GOROOT)
-        echo "Go Root found at: $GOROOT"
-        
-        # 强行将系统 GOROOT 目录的所有权赋予当前普通用户 runner，彻底解决权限和缓存用户不匹配的硬伤
-        sudo chown -R runner:runner $GOROOT
-        
-        # 终极物理劫持：更加鲁棒地全局匹配 DialContext 连接，强行将所有原生 DNS 物理连接重定向至 53533 拦截端口
-        find $GOROOT/src/net/ -type f -name "lookup.go" -exec sed -i 's|DialContext(ctx, network, address)|DialContext(ctx, "udp", "127.0.0.1:53533")|g' {} +
-        
-        # 自动验证补丁是否注入成功
-        echo "===== 自动验证补丁注入状态 ====="
-        grep -rn "127.0.0.1:53533" $GOROOT/src/net/ || true
-        echo "=============================="
-
-    # 3. 强行且仅对 net 标准网络包进行安全重构
-    - name: Force Rebuild Patched Go Net Package
-      run: |
-        export CGO_ENABLED=0
-        export GOOS=android
-        export GOARCH=arm64
-        
-        # 作为普通用户直接编译，强制重新构建物理劫持后的 net 标准库网络包
-        go install -a net
-        echo "Patched standard net package compiled and cached successfully!"
-
-    # 4. 编译并生成适用于 Android 的 libcloudflared.so (注入极简高阶 DNS 拦截服务端，全量一次性大劫持)
+    # 2. 编译并生成适用于 Android 的 libcloudflared.so (锁定 2024.12.2 官方稳定版 + 注入高阶 DNS 拦截器)
     - name: Compile cloudflared for Android ARM64
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
-        git clone --depth 1 https://github.com/cloudflare/cloudflared.git cloudflared-src
         
-        # 注入 Go 全局高阶 DNS 拦截服务器 (已修正第 103 行 "udp" 字符串拼写笔误)
+        # 一劳永逸：强行克隆官方 2024.12.2 稳定版分支，避开 master 开发分支无休止的依赖版本变动
+        git clone --depth 1 --branch 2024.12.2 https://github.com/cloudflare/cloudflared.git cloudflared-src
+        
+        # 注入 Go 全局高阶 DNS 拦截服务器
         cat << 'EOF' > cloudflared-src/cmd/cloudflared/dns_patch.go
         package main
 
@@ -200,59 +174,20 @@ jobs:
         }
         EOF
         
-        # 1. 物理删除内置的整个 vendor 依赖目录！避免多包命名别名冲突
-        rm -rf cloudflared-src/vendor
-        
-        # 2. 强行修改主项目的 go.mod，将要求的 Go 最低版本重定向为本地打过补丁的 1.24
-        # 同时删除 any "toolchain" 指导
-        sed -i 's|^go 1\.[0-9]\+|go 1.24|g' cloudflared-src/go.mod
-        sed -i '/^toolchain/d' cloudflared-src/go.mod
-        
-        # 3. 终极天罗地网劫持：在 go.mod 底部强行追加 8 大核心工具包 replace 规则！
-        # 彻底断绝任何高版本子依赖包在公网拉取时的强行验证阻断！
-        echo "replace golang.org/x/net => golang.org/x/net v0.33.0" >> cloudflared-src/go.mod
-        echo "replace golang.org/x/term => golang.org/x/term v0.26.0" >> cloudflared-src/go.mod
-        echo "replace golang.org/x/crypto => golang.org/x/crypto v0.31.0" >> cloudflared-src/go.mod
-        echo "replace golang.org/x/sys => golang.org/x/sys v0.28.0" >> cloudflared-src/go.mod
-        echo "replace golang.org/x/sync => golang.org/x/sync v0.10.0" >> cloudflared-src/go.mod
-        echo "replace golang.org/x/text => golang.org/x/text v0.21.0" >> cloudflared-src/go.mod
-        echo "replace golang.org/x/tools => golang.org/x/tools v0.29.0" >> cloudflared-src/go.mod
-        echo "replace golang.org/x/mod => golang.org/x/mod v0.22.0" >> cloudflared-src/go.mod
-        
-        # 4. 强行劫持 OpenTelemetry (OTel) 核心包依赖到兼容 1.24 的 v1.34.0 稳定版本
-        # 注意：此处彻底剔除了已经断代被官方废弃的 propagators 强替规则，保留其原本无害的 v0.22.0 默认引用
-        echo "replace go.opentelemetry.io/otel => go.opentelemetry.io/otel v1.34.0" >> cloudflared-src/go.mod
-        echo "replace go.opentelemetry.io/otel/metric => go.opentelemetry.io/otel/metric v1.34.0" >> cloudflared-src/go.mod
-        echo "replace go.opentelemetry.io/otel/trace => go.opentelemetry.io/otel/trace v1.34.0" >> cloudflared-src/go.mod
-        echo "replace go.opentelemetry.io/otel/sdk => go.opentelemetry.io/otel/sdk v1.34.0" >> cloudflared-src/go.mod
-        echo "replace go.opentelemetry.io/otel/sdk/metric => go.opentelemetry.io/otel/sdk/metric v1.34.0" >> cloudflared-src/go.mod
-        echo "replace go.opentelemetry.io/otel/exporters/otlp/otlptrace => go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.34.0" >> cloudflared-src/go.mod
-        echo "replace go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc => go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.34.0" >> cloudflared-src/go.mod
-        echo "replace go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp => go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.34.0" >> cloudflared-src/go.mod
-        echo "replace go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc => go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.34.0" >> cloudflared-src/go.mod
-        echo "replace go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp => go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.34.0" >> cloudflared-src/go.mod
-        
         cd cloudflared-src
+        
+        # 100% 原生静态纯 Go 编译，不需要任何 replace 劫持或 vendor 降级！
         export CGO_ENABLED=0
         export GOOS=android
         export GOARCH=arm64
         
-        # 强制锁定本地编译器，配合全新干净的物理缓存目录
-        export GOTOOLCHAIN=local
-        mkdir -p /tmp/go-clean-cache
-        export GOCACHE=/tmp/go-clean-cache
-        
-        # 自动执行依赖指纹和 go.sum 补齐整理，一键攻克 Hash 缺失报错
-        echo "Tidying go modules..."
-        go mod tidy
-        
-        echo "Starting pure Go static compilation with Clean-GOCACHE and OTel Family Dependency-Replacement..."
+        echo "Starting pure Go static compilation for Android ARM64..."
         go build -ldflags="-s -w" -o ../app/src/main/jniLibs/arm64-v8a/libcloudflared.so github.com/cloudflare/cloudflared/cmd/cloudflared
         
         cd ..
         ls -lh app/src/main/jniLibs/arm64-v8a/libcloudflared.so
 
-    # 5. 配置 Java 运行环境
+    # 3. 配置 Java 运行环境
     - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
@@ -260,7 +195,7 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    # 6. 强制生成兼容的 Gradle 8.5 包装器并授予执行权限
+    # 4. 强制生成兼容的 Gradle 8.5 包装器并授予执行权限
     - name: Generate Gradle Wrapper
       run: |
         if [ ! -f "gradlew" ]; then
@@ -268,11 +203,11 @@ jobs:
         fi
         chmod +x gradlew
 
-    # 7. 执行打包命令
+    # 5. 执行打包命令
     - name: Build with Gradle
       run: ./gradlew assembleDebug
 
-    # 8. 将 APK 作为 Artifact 上传，供用户下载
+    # 6. 将 APK 作为 Artifact 上传，供用户下载
     - name: Upload Output APK
       uses: actions/upload-artifact@v4
       with:
